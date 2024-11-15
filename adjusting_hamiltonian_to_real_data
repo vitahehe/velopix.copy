@@ -185,117 +185,119 @@ class Segment(object):
 
     def __repr__(self):
         return f"Segment(from_hit={self.from_hit.id}, to_hit={self.to_hit.id})"
+    
+import numpy as np
+import scipy.sparse as sp
+from scipy.sparse import dok_matrix, csc_matrix
+from joblib import Parallel, delayed
 
-# Now, let's adjust your Hamiltonian function
-def generate_hamiltonian_optimized(event, params):
-    lambda_val = params.get('lambda', 100.0)
-    alpha = params.get('alpha', 1.0)
-    beta = params.get('beta', 1.0)
+def angular_and_bifurcation_checks(i, vectors, norms, segments, N, alpha, eps):
+    """Performs angular consistency and bifurcation checks for a given index `i`."""
+    results_ang = []
+    results_bif = []
+    
+    vect_i = vectors[i]
+    norm_i = norms[i]
 
-    modules = sorted(event.modules, key=lambda module: module.z)
-    print("Modules sorted by z-coordinate.")
+    for j in range(i + 1, N):  # Only upper triangle
+        vect_j = vectors[j]
+        norm_j = norms[j]
+        cosine = np.dot(vect_i, vect_j) / (norm_i * norm_j)
 
-    segments = []
-    for idx in range(len(modules) - 1):
-        module_from = modules[idx]
-        module_to = modules[idx + 1]
-        # Optionally, print module indices and z-values
-        print(f"Creating segments between Module {module_from.module_number} (z={module_from.z}) "
-              f"and Module {module_to.module_number} (z={module_to.z}).")
-        for from_hit, to_hit in itertools.product(module_from.hits(), module_to.hits()):
-            segments.append(Segment(from_hit, to_hit))
+        # Angular consistency
+        if np.abs(cosine - 1) < eps:
+            results_ang.append((i, j, 1))
 
+        # Bifurcation consistency
+        seg_i, seg_j = segments[i], segments[j]
+        if seg_i.from_hit.module_number == seg_j.from_hit.module_number and seg_i.to_hit.module_number != seg_j.to_hit.module_number:
+            results_bif.append((i, j, -alpha))
+        elif seg_i.from_hit.module_number != seg_j.from_hit.module_number and seg_i.to_hit.module_number == seg_j.to_hit.module_number:
+            results_bif.append((i, j, -alpha))
+
+    return results_ang, results_bif
+
+def generate_hamiltonian_optimizedPAR(event, params):
+    lambda_val = params.get('lambda')
+    alpha = params.get('alpha')
+    beta = params.get('beta')
+
+    # Sort modules by their z-coordinates
+    modules = sorted(event.modules, key=lambda a: a.z)
+
+    # Generate segments
+    segments = [
+        Segment(from_hit, to_hit)
+        for idx in range(len(modules) - 1)
+        for from_hit, to_hit in itertools.product(modules[idx].hits(), modules[idx + 1].hits())
+    ]
+    
     N = len(segments)
-    print("Number of segments created:", N)
-
-    A_ang_blocks = []
-    A_bif_blocks = []
-    A_inh_blocks = []
     b = np.zeros(N)
 
-    block_size = 500
-    num_blocks = (N + block_size - 1) // block_size
-    print("Number of blocks:", num_blocks)
+    vectors = np.array([seg.to_vect() for seg in segments])
+    norms = np.linalg.norm(vectors, axis=1)
 
-    for block_idx in range(num_blocks):
-        start_idx = block_idx * block_size
-        end_idx = min(start_idx + block_size, N)
-        print(f"Processing block {block_idx + 1}/{num_blocks} "
-              f"(segments {start_idx} to {end_idx - 1}).")
+    eps = 1e-9  # Precision threshold
+    results = Parallel(n_jobs=-1, backend="loky")(
+        delayed(angular_and_bifurcation_checks)(i, vectors, norms, segments, N, alpha, eps)
+        for i in range(N)
+    )
 
-        # lil_matrix for each block
-        size = end_idx - start_idx
-        A_ang_block = lil_matrix((size, size), dtype=np.float32)
-        A_bif_block = lil_matrix((size, size), dtype=np.float32)
-        A_inh_block = lil_matrix((size, size), dtype=np.float32)
+    # Aggregate results
+    A_ang = dok_matrix((N, N), dtype=np.float64)
+    A_bif = dok_matrix((N, N), dtype=np.float64)
 
-        # Filling
-        for i in range(start_idx, end_idx):
-            seg_i = segments[i]
-            vect_i = seg_i.to_vect()
-            norm_i = np.linalg.norm(vect_i)
-            if norm_i == 0:
-                print(f"Zero-length vector encountered at segment {i}. Skipping.")
-                continue  # Skip zero-length vectors
+    for ang_results, bif_results in results:
+        for i, j, value in ang_results:
+            A_ang[i, j] = value
+            A_ang[j, i] = value  # Symmetric
+        for i, j, value in bif_results:
+            A_bif[i, j] = value
+            A_bif[j, i] = value  # Symmetric
 
-            for j in range(i + 1, end_idx):
-                seg_j = segments[j]
-                vect_j = seg_j.to_vect()
-                norm_j = np.linalg.norm(vect_j)
-                if norm_j == 0:
-                    continue 
-
-                # Avoid division by zero
-                denominator = norm_i * norm_j
-                if denominator == 0:
-                    continue
-
-                cosine = np.dot(vect_i, vect_j) / denominator
+ 
+    A_ang = A_ang.tocsc()
+    A_bif = A_bif.tocsc()
 
 
-                if np.abs(cosine - 1) < 1e-9:
-                    A_ang_block[i - start_idx, j - start_idx] = 1
-                    A_ang_block[j - start_idx, i - start_idx] = 1  # Symmetry with positive sign
-
-                if seg_i.from_hit == seg_j.from_hit and seg_i.to_hit != seg_j.to_hit:
-                    A_bif_block[i - start_idx, j - start_idx] = -alpha
-                    A_bif_block[j - start_idx, i - start_idx] = -alpha 
-
-                if seg_i.from_hit != seg_j.from_hit and seg_i.to_hit == seg_j.to_hit:
-                    A_bif_block[i - start_idx, j - start_idx] = -alpha
-                    A_bif_block[j - start_idx, i - start_idx] = -alpha  # Symmetry with negative sign
-
-                s_ab = int(seg_i.from_hit.module_id == 1 and seg_j.to_hit.module_id == 1)
-                if s_ab > 0:
-                    A_inh_block[i - start_idx, j - start_idx] = beta * s_ab * s_ab
-                    A_inh_block[j - start_idx, i - start_idx] = beta * s_ab * s_ab  # Symmetry with positive sign
-
-        A_ang_blocks.append(A_ang_block)
-        A_bif_blocks.append(A_bif_block)
-        A_inh_blocks.append(A_inh_block)
-
-    A_ang = block_diag(A_ang_blocks, format='csc')
-    A_bif = block_diag(A_bif_blocks, format='csc')
-    A_inh = block_diag(A_inh_blocks, format='csc')
-
+    module_ids_from = np.array([seg.from_hit.module_number for seg in segments])
+    module_ids_to = np.array([seg.to_hit.module_number for seg in segments])
+    A_inh = sp.csc_matrix((module_ids_from == module_ids_to[:, None]), dtype=int) * beta
     A = -1 * (A_ang + A_bif + A_inh)
-
-    print("Hamiltonian matrices constructed.")
-    print("Shape of A_ang:", A_ang.shape)
-    print("Shape of A_bif:", A_bif.shape)
-    print("Shape of A_inh:", A_inh.shape)
-    print("Shape of A:", A.shape)
 
     return A, b, segments
 
+
+def check_modules_with_no_hits(event):
+
+    modules_with_no_hits = []
+    for idx, module in enumerate(event.modules):
+        hits_count = len(module.hits())
+        if hits_count == 0:
+            print(f"Module {idx}: z = {module.z}, has no hits.")
+            modules_with_no_hits.append(idx)
+        else:
+            print(f"Module {idx}: z = {module.z}, hits count = {hits_count}")
+    
+    print(f"\nTotal Modules with No Hits: {len(modules_with_no_hits)}")
+    return modules_with_no_hits
+
+
+
+
 event = Event(json_data)
+c = check_modules_with_no_hits(event)
 params = {
     'lambda': 100.0,
     'alpha': 1.0,
     'beta': 1.0
+
 }
 
 print("Computing Hamiltonian...")
-A, b, segments = event.compute_hamiltonian(generate_hamiltonian_optimized, params)
+A, b, segments = event.compute_hamiltonian(generate_hamiltonian_optimizedPAR, params)
+
+print(segments)
 print(A.toarray())
 print("Hamiltonian computed.")

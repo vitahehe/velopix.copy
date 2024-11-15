@@ -6,224 +6,98 @@ from my_event_model import my_event_model as em
 from my_event_model import Segment
 from validator import validator_lite as vl
 from dimod import BinaryQuadraticModel, SimulatedAnnealingSampler
-import psutil
-import time
 import itertools
 import dimod
-import psutil
 from scipy.sparse import lil_matrix, csc_matrix, block_diag
 import tracemalloc
 from dwave.system import LeapHybridSampler
 from copy import deepcopy 
 from random import random, randint
 from dimod.reference.samplers import ExactSolver
+import dimod
+import scipy.sparse as sp
+from scipy.sparse import dok_matrix, csc_matrix
+from joblib import Parallel, delayed
 
-os.environ['DWAVE_API_TOKEN'] = 'DEV-031741f1792495e220d4d55aeb72ab7961cc16cd'
+os.environ['DWAVE_API_TOKEN'] = 'DEV-21eed68bc845cad41711b2246f5765393f209d1f'
 
-def qubosolverCl(A, b):
-    """
-    Classical QUBO solver using dimod's ExactSolver for deterministic results.
-    """
-    A = csc_matrix(A)
-    bqm = dimod.BinaryQuadraticModel.empty(dimod.BINARY)
-    bqm.add_variables_from({i: b[i] for i in range(len(b))})
+def angular_and_bifurcation_checks(i, vectors, norms, segments, N, alpha, eps):
+    results_ang = []
+    results_bif = []
     
-    row, col = A.nonzero()  # Get non-zero entries in the matrix A
-    for i, j in zip(row, col):
-        if i != j:
-            bqm.add_interaction(i, j, A[i, j])
+    vect_i = vectors[i]
+    norm_i = norms[i]
 
-    # Use ExactSolver to solve
-    sampler = ExactSolver()
-    response = sampler.sample(bqm)
-    best_sample = response.first.sample
-    sol_sample = np.fromiter(best_sample.values(), dtype=int)
+    for j in range(i + 1, N):
+        vect_j = vectors[j]
+        norm_j = norms[j]
+        cosine = np.dot(vect_i, vect_j) / (norm_i * norm_j)
+
+        if np.abs(cosine - 1) < eps:
+            results_ang.append((i, j, 1))
+
+        seg_i, seg_j = segments[i], segments[j]
+        if seg_i.from_hit == seg_j.from_hit and seg_i.to_hit != seg_j.to_hit:
+            results_bif.append((i, j, -alpha))
+        elif seg_i.from_hit != seg_j.from_hit and seg_i.to_hit == seg_j.to_hit:
+            results_bif.append((i, j, -alpha))
+
+    return results_ang, results_bif
+
+def generate_hamiltonian_optimizedPAR(event, params):
+    lambda_val = params.get('lambda')
+    alpha = params.get('alpha')
+    beta = params.get('beta')
+
+    modules = sorted(event.modules, key=lambda a: a.z)
+
+    # Generate segments
+    segments = [
+        Segment(from_hit, to_hit)
+        for idx in range(len(modules) - 1)
+        for from_hit, to_hit in itertools.product(modules[idx].hits(), modules[idx + 1].hits())
+    ]
     
-    print(f"Solution Classical: {sol_sample}")
-    return sol_sample
-
-def find_segments(s0, active):
-       found_s = []
-       for s1 in active:
-           if s0.from_hit.id == s1.to_hit.id or \
-           s1.from_hit.id == s0.to_hit.id:
-               found_s.append(s1)
-       return found_s
-
-def get_qubo_solution(sol_sample, event, segments):
-   active_segments = [segment for segment,pseudo_state in zip(segments,sol_sample) if pseudo_state > np.min(sol_sample)]
-   active = deepcopy(active_segments)
-   tracks = []
-
-   while len(active):
-       s = active.pop()
-       nextt = find_segments(s, active)
-       track = set([s.from_hit.id, s.to_hit.id])
-       while len(nextt):
-           s = nextt.pop()
-           try:
-               active.remove(s)
-           except:
-               pass
-           nextt += find_segments(s, active)
-           track = track.union(set([s.from_hit.id, s.to_hit.id]))
-       tracks.append(track)
-   tracks_processed = []
-   for track in tracks:
-       tracks_processed.append(em.track([list(filter(lambda b: b.id == a, event.hits))[0] for a in track]))
-   return tracks_processed
-
-# Hamiltonian generator and solver function
-def generate_hamiltonian_optimized(event, params):
-    lambda_val = params.get('lambda', 100.0)
-    alpha = params.get('alpha', 1.0)
-    beta = params.get('beta', 1.0)
-
-    modules = sorted(event.modules, key=lambda module: module.z)
-    print("Modules sorted by z-coordinate.")
-
-    segments = []
-    for idx in range(len(modules) - 1):
-        module_from = modules[idx]
-        module_to = modules[idx + 1]
-        # Optionally, print module indices and z-values
-        print(f"Creating segments between Module {module_from.module_number} (z={module_from.z}) "
-              f"and Module {module_to.module_number} (z={module_to.z}).")
-        for from_hit, to_hit in itertools.product(module_from.hits(), module_to.hits()):
-            segments.append(Segment(from_hit, to_hit))
-
     N = len(segments)
-    print("Number of segments created:", N)
-
-    A_ang_blocks = []
-    A_bif_blocks = []
-    A_inh_blocks = []
     b = np.zeros(N)
 
-    block_size = 500
-    num_blocks = (N + block_size - 1) // block_size
-    print("Number of blocks:", num_blocks)
+    vectors = np.array([seg.to_vect() for seg in segments])
+    norms = np.linalg.norm(vectors, axis=1)
 
-    for block_idx in range(num_blocks):
-        start_idx = block_idx * block_size
-        end_idx = min(start_idx + block_size, N)
-        print(f"Processing block {block_idx + 1}/{num_blocks} "
-              f"(segments {start_idx} to {end_idx - 1}).")
+    eps = 1e-9  
 
-        # lil_matrix for each block
-        size = end_idx - start_idx
-        A_ang_block = lil_matrix((size, size), dtype=np.float32)
-        A_bif_block = lil_matrix((size, size), dtype=np.float32)
-        A_inh_block = lil_matrix((size, size), dtype=np.float32)
+    results = Parallel(n_jobs=-1, backend="loky")(
+        delayed(angular_and_bifurcation_checks)(i, vectors, norms, segments, N, alpha, eps)
+        for i in range(N)
+    )
 
-        # Filling
-        for i in range(start_idx, end_idx):
-            seg_i = segments[i]
-            vect_i = seg_i.to_vect()
-            norm_i = np.linalg.norm(vect_i)
-            if norm_i == 0:
-                print(f"Zero-length vector encountered at segment {i}. Skipping.")
-                continue  # Skip zero-length vectors
+    # Aggregate results
+    A_ang = dok_matrix((N, N), dtype=np.float64)
+    A_bif = dok_matrix((N, N), dtype=np.float64)
 
-            for j in range(i + 1, end_idx):
-                seg_j = segments[j]
-                vect_j = seg_j.to_vect()
-                norm_j = np.linalg.norm(vect_j)
-                if norm_j == 0:
-                    continue 
+    for ang_results, bif_results in results:
+        for i, j, value in ang_results:
+            A_ang[i, j] = value
+            A_ang[j, i] = value  # Symmetric
+        for i, j, value in bif_results:
+            A_bif[i, j] = value
+            A_bif[j, i] = value  # Symmetric
 
-                # Avoid division by zero
-                denominator = norm_i * norm_j
-                if denominator == 0:
-                    continue
+    A_ang = A_ang.tocsc()
+    A_bif = A_bif.tocsc()
 
-                cosine = np.dot(vect_i, vect_j) / denominator
-
-
-                if np.abs(cosine - 1) < 1e-9:
-                    A_ang_block[i - start_idx, j - start_idx] = 1
-                    A_ang_block[j - start_idx, i - start_idx] = 1  # Symmetry with positive sign
-
-                if seg_i.from_hit == seg_j.from_hit and seg_i.to_hit != seg_j.to_hit:
-                    A_bif_block[i - start_idx, j - start_idx] = -alpha
-                    A_bif_block[j - start_idx, i - start_idx] = -alpha 
-
-                if seg_i.from_hit != seg_j.from_hit and seg_i.to_hit == seg_j.to_hit:
-                    A_bif_block[i - start_idx, j - start_idx] = -alpha
-                    A_bif_block[j - start_idx, i - start_idx] = -alpha  # Symmetry with negative sign
-
-                s_ab = int(seg_i.from_hit.module_id == 1 and seg_j.to_hit.module_id == 1)
-                if s_ab > 0:
-                    A_inh_block[i - start_idx, j - start_idx] = beta * s_ab * s_ab
-                    A_inh_block[j - start_idx, i - start_idx] = beta * s_ab * s_ab  # Symmetry with positive sign
-
-        A_ang_blocks.append(A_ang_block)
-        A_bif_blocks.append(A_bif_block)
-        A_inh_blocks.append(A_inh_block)
-
-    A_ang = block_diag(A_ang_blocks, format='csc')
-    A_bif = block_diag(A_bif_blocks, format='csc')
-    A_inh = block_diag(A_inh_blocks, format='csc')
-
+    # Inhibitory interactions
+    module_ids_from = np.array([seg.from_hit.module_number for seg in segments])
+    module_ids_to = np.array([seg.to_hit.module_number for seg in segments])
+    A_inh = sp.csc_matrix((module_ids_from == module_ids_to[:, None]), dtype=int) * beta
     A = -1 * (A_ang + A_bif + A_inh)
 
-    print("Hamiltonian matrices constructed.")
-    print("Shape of A_ang:", A_ang.shape)
-    print("Shape of A_bif:", A_bif.shape)
-    print("Shape of A_inh:", A_inh.shape)
-    print("Shape of A:", A.shape)
+    # Debug prints
+    print(f"Hamiltonian matrix (A) shape: {A.shape}, non-zero elements: {A.nnz}")
+    print(f"b vector: {b}")
+    print(f"Segments count: {len(segments)}")
 
     return A, b, segments
-
-import dimod
-import psutil
-import time
-from scipy.sparse import csc_matrix
-
-def qubosolver(A, b):
-
-    #performance measurement
-    process = psutil.Process()
-    start_memory = process.memory_info().rss / (1024 ** 2)  # Memory in MB
-    start_time = time.time()
-
-    #Keep A sparse
-    A = csc_matrix(A)
-    print('sucessfully matrix in csc')
-
-    bqm = dimod.BinaryQuadraticModel.empty(dimod.BINARY)
-
-    #vectors for efficiency 
-    bqm.add_variables_from({i: b[i] for i in range(len(b))})
-
-    row, col = A.nonzero() 
-
-    print('test2') 
-    for i, j in zip(row, col):
-        if i != j:  
-            bqm.add_interaction(i, j, A[i, j])
-    print(np.shape(A.toarray()))
-    sampler = SimulatedAnnealingSampler()
-    response = sampler.sample(bqm, num_reads=100)
-    print('test4')
-
-    best_sample = response.first.sample
-
-    print('test5')
-    sol_sample = np.fromiter(best_sample.values(), dtype=int)  
-
-    end_memory = process.memory_info().rss / (1024 ** 2) 
-    end_time = time.time()
-
-   
-    memory_used = end_memory - start_memory
-    time_taken = end_time - start_time
-
-    print(f"Solution Simulated Annealing:{sol_sample}")
-    print(f"Memory {memory_used:.2f} MB")
-    print(f"Time {time_taken:.6f} seconds")
-
-    return sol_sample
 
 def qubosolverHr(A, b):
     A = csc_matrix(A)
@@ -235,16 +109,68 @@ def qubosolverHr(A, b):
         if i != j:
             bqm.add_interaction(i, j, A[i, j])
 
+    # Debug prints
+    print("Constructed Binary Quadratic Model:")
+    print(bqm)
+
     # Use LeapHybridSampler to solve
     sampler = LeapHybridSampler()
     response = sampler.sample(bqm)
     best_sample = response.first.sample
     sol_sample = np.fromiter(best_sample.values(), dtype=int)
     
+    # Debug prints
+    print(f"Solver response: {response}")
+    print(f"Best sample: {best_sample}")
     print(f"Solution Hybrid: {sol_sample}")
+
     return sol_sample
 
-# Parameters for Hamiltonian generation
+def find_segments(s0, active):
+    found_s = []
+    for s1 in active:
+        if s0.from_hit.id == s1.to_hit.id or \
+           s1.from_hit.id == s0.to_hit.id:
+            found_s.append(s1)
+    # Debug print
+    print(f"find_segments: Found {len(found_s)} segments for segment {s0}")
+    return found_s
+
+def get_qubo_solution(sol_sample, event, segments):
+    # Debug print
+    print(f"sol_sample: {sol_sample}")
+    print(f"Number of segments: {len(segments)}")
+
+    active_segments = [segment for segment, pseudo_state in zip(segments, sol_sample) if pseudo_state > np.min(sol_sample)]
+    print(f"Active segments count: {len(active_segments)}")
+    active = deepcopy(active_segments)
+    tracks = []
+
+    while len(active):
+        s = active.pop()
+        nextt = find_segments(s, active)
+        track = set([s.from_hit.id, s.to_hit.id])
+        while len(nextt):
+            s = nextt.pop()
+            try:
+                active.remove(s)
+            except ValueError:
+                pass
+            nextt += find_segments(s, active)
+            track = track.union(set([s.from_hit.id, s.to_hit.id]))
+        tracks.append(track)
+
+    # Debug print
+    print(f"Generated {len(tracks)} tracks.")
+
+    tracks_processed = []
+    for track in tracks:
+        hits = [list(filter(lambda b: b.id == a, event.hits))[0] for a in track]
+        tracks_processed.append(em.track(hits))
+        print(f"Track processed: {hits}")
+
+    return tracks_processed
+
 params = {
     'lambda': 100.0,
     'alpha': 1.0,
@@ -256,28 +182,27 @@ solutions = {
 }
 validation_data = []
 
+
 for dirpath, dirnames, filenames in os.walk("events"):
     for i, filename in enumerate(filenames):
         if i != 2:
-            continue  # Skip events other than i=4
+            continue  
 
-        # Load event 4
+
         with open(os.path.realpath(os.path.join(dirpath, filename)), 'r') as f:
             json_data = json.load(f)
             event = em.Event(json_data)
 
+
+
         # Generate Hamiltonian and solve it
         print(f"Processing event {i}: {filename}")
-        A, b, segments = event.compute_hamiltonian(generate_hamiltonian_optimized, params)
+        A, b, segments = event.compute_hamiltonian(generate_hamiltonian_optimizedPAR, params)
         print(A.toarray())
 
         sol_sample = qubosolverHr(A, b)
-        sol
-        assert False 
+        #qubosolverTABU(A, b)
         tracks = get_qubo_solution(sol_sample.tolist(), event, segments)
-        print(tracks)
-        print(tracks.pop())
-        print(type(tracks.pop()))
 
         solutions["quantum_annealing"].append(tracks)
         validation_data.append(json_data)
@@ -288,3 +213,4 @@ for k, v in sorted(solutions.items()):
     print(f"\nValidating tracks from {k}:")
     vl.validate_print(validation_data, v)
     print()
+
