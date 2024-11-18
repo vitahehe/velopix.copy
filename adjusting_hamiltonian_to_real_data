@@ -1,161 +1,54 @@
-import hashlib
 import numpy as np
 import itertools
 import scipy.sparse as sp
 from scipy.sparse import dok_matrix, csc_matrix
 from joblib import Parallel, delayed
-import json
+from dwave.system import LeapHybridSampler
+import dimod
+import os
+os.environ['DWAVE_API_TOKEN'] = 'DEV-b59f413d6a1407427e9f0079dd8e3cfb8106e58d'
+def qubosolverHr(A, b):
+    A = csc_matrix(A)
+    bqm = dimod.BinaryQuadraticModel.empty(dimod.BINARY)
+    bqm.add_variables_from({i: b[i] for i in range(len(b))})
+    
+    row, col = A.nonzero()  # Get non-zero entries in the matrix A
+    for i, j in zip(row, col):
+        if i != j:
+            bqm.add_interaction(i, j, A[i, j])
 
-# Load JSON data
-filepath = 'C:/Users/Vita/Documents/GitHub/velopix.copy-1/events/velo_event_2.json'
+    # Debug prints
+    print("Constructed Binary Quadratic Model:")
+    print(bqm)
 
-with open(filepath, 'r') as f:
-    json_data = json.load(f)
+    # Use LeapHybridSampler to solve
+    sampler = LeapHybridSampler()
+    response = sampler.sample(bqm)
+    best_sample = response.first.sample
+    sol_sample = np.fromiter(best_sample.values(), dtype=int)
+    
+    # Debug prints
+    print(f"Solver response: {response}")
+    print(f"Best sample: {best_sample}")
+    print(f"Solution Hybrid: {sol_sample}")
 
-print("Loaded json_data with keys:", json_data.keys())
-print("Number of modules (from module_prefix_sum):", len(json_data["module_prefix_sum"]) - 1)
-print("Number of hits (from x, y, z arrays):", len(json_data["x"]))
+    return sol_sample
 
-class Event(object):
-    def __init__(self, json_data):
-        self.number_of_modules = len(json_data["module_prefix_sum"]) - 1
-        print("Event has {} modules.".format(self.number_of_modules))
-        self.description = json_data.get("description", "")
-        self.montecarlo = json_data.get("montecarlo", "")
-        self.module_prefix_sum = json_data["module_prefix_sum"]
-        self.number_of_hits = self.module_prefix_sum[self.number_of_modules]
-        self.hits = []
-        self.with_t = "t" in json_data
-
-        self.modules = []
-        for m in range(self.number_of_modules):
-            start_idx = self.module_prefix_sum[m]
-            end_idx = self.module_prefix_sum[m + 1]
-            module_hits = []
-            z_values = set()
-            for i in range(start_idx, end_idx):
-                if self.with_t:
-                    new_hit = Hit(
-                        x=json_data["x"][i],
-                        y=json_data["y"][i],
-                        z=json_data["z"][i],
-                        hit_id=i,
-                        module=m,
-                        t=json_data["t"][i],
-                        with_t=True
-                    )
-                else:
-                    new_hit = Hit(
-                        x=json_data["x"][i],
-                        y=json_data["y"][i],
-                        z=json_data["z"][i],
-                        hit_id=i,
-                        module=m
-                    )
-                self.hits.append(new_hit)
-                module_hits.append(new_hit)
-                z_values.add(json_data["z"][i])
-            if len(module_hits) == 0:
-                module_z = float('nan')
-            else:
-                module_z = z_values.pop() if len(z_values) == 1 else np.mean(list(z_values))
-            new_module = Module(
-                module_number=m,
-                z=module_z,
-                hits=module_hits
-            )
-            self.modules.append(new_module)
-
-        print("Total number of hits in event:", len(self.hits))
-        print("Total number of modules in event:", len(self.modules))
-
-    def compute_hamiltonian(self, hamiltonian_function, params):
-        return hamiltonian_function(self, params)
-
-class Hit(object):
-    def __init__(self, x, y, z, hit_id, module=-1, t=0, with_t=False):
-        self.x = x
-        self.y = y
-        self.z = z
-        self.t = t
-        self.id = hit_id
-        self.module_number = module
-        self.module_id = module
-        self.with_t = with_t
-
-    def __getitem__(self, index):
-        if index < 0 or index > 2:
-            raise IndexError
-        if index == 0:
-            return self.x
-        elif index == 1:
-            return self.y
-        else:
-            return self.z
-
-    def __repr__(self):
-        return "#" + str(self.id) + " module " + str(self.module_number) + \
-            " {" + str(self.x) + ", " + \
-            str(self.y) + ", " + str(self.z) + \
-            (", " + str(self.t) if self.with_t else "") + "}"
-
-    def __eq__(self, other):
-        return self.id == other.id
-
-    def __ne__(self, other):
-        return not self.__eq__(other)
-
-    def __hash__(self):
-        return self.id
-
-class Module(object):
-    def __init__(self, module_number, z, hits):
-        self.module_number = int(module_number)
-        self.z = z
-        self.hits_list = hits
-
-    def __iter__(self):
-        return iter(self.hits())
-
-    def __repr__(self):
-        return "module " + str(self.module_number) + ":\n" + \
-            " At z: " + str(self.z) + "\n" + \
-            " Number of hits: " + str(len(self.hits())) + "\n" + \
-            " Hits (#id {x, y, z}): " + str(self.hits())
-
-    def hits(self):
-        return self.hits_list
-
-class Segment(object):
+# Define the Segment class according to the logic of the original Hamiltonian
+class Segment:
     def __init__(self, from_hit, to_hit):
         self.from_hit = from_hit
         self.to_hit = to_hit
 
     def to_vect(self):
+        """Returns the vector representation of the segment."""
         return np.array([
             self.to_hit.x - self.from_hit.x,
             self.to_hit.y - self.from_hit.y,
             self.to_hit.z - self.from_hit.z
         ])
 
-    def __eq__(self, other):
-        return self.from_hit == other.from_hit and self.to_hit == other.to_hit
-
-    def __hash__(self):
-        return hash((self.from_hit, self.to_hit))
-
-    def __repr__(self):
-        return f"Segment(from_hit={self.from_hit.id}, to_hit={self.to_hit.id})"
-
-import numpy as np
-import scipy.sparse as sp
-from scipy.sparse import dok_matrix, csc_matrix
-from joblib import Parallel, delayed
-import itertools  # Ensure itertools is imported
-
-# Ensure that the Segment class is defined or imported
-# from your_module import Segment
-
+# Angular and bifurcation consistency checks
 def angular_and_bifurcation_checks(i, vectors, norms, segments, N, alpha, eps):
     """Performs angular consistency and bifurcation checks for a given index `i`."""
     results_ang = []
@@ -163,6 +56,7 @@ def angular_and_bifurcation_checks(i, vectors, norms, segments, N, alpha, eps):
     
     vect_i = vectors[i]
     norm_i = norms[i]
+    seg_i = segments[i]
 
     for j in range(i + 1, N):  # Only upper triangle
         vect_j = vectors[j]
@@ -174,7 +68,7 @@ def angular_and_bifurcation_checks(i, vectors, norms, segments, N, alpha, eps):
             results_ang.append((i, j, 1))
 
         # Bifurcation consistency
-        seg_i, seg_j = segments[i], segments[j]
+        seg_j = segments[j]
         if seg_i.from_hit == seg_j.from_hit and seg_i.to_hit != seg_j.to_hit:
             results_bif.append((i, j, -alpha))
         elif seg_i.from_hit != seg_j.from_hit and seg_i.to_hit == seg_j.to_hit:
@@ -182,20 +76,26 @@ def angular_and_bifurcation_checks(i, vectors, norms, segments, N, alpha, eps):
 
     return results_ang, results_bif
 
-def generate_hamiltonian_optimizedPAR(event, params):
-    lambda_val = params.get('lambda', 1.0)
-    alpha = params.get('alpha', 10.0)
-    beta = params.get('beta', 10.0)
+# Adapted Hamiltonian function for real data
+def generate_hamiltonian_real_data(event, params):
+    lambda_val = params.get('lambda')
+    alpha = params.get('alpha')
+    beta = params.get('beta')
 
-    # Sort modules by their z-coordinate
-    modules = sorted(event.modules, key=lambda a: a.z)
+    non_empty_modules = [m for m in event.modules if m.z]
 
-    # Generate segments between consecutive modules
-    segments = [
-        Segment(from_hit, to_hit)
-        for idx in range(len(modules) - 1)
-        for from_hit, to_hit in itertools.product(modules[idx].hits(), modules[idx + 1].hits())
-    ]
+# Now sort the non-empty modules
+    modules = sorted(non_empty_modules, key=lambda m: min(m.z))
+    # Generate segments between hits in adjacent modules
+    segments = []
+    for idx in range(len(modules) - 1):
+        module_from = modules[idx]
+        module_to = modules[idx + 1]
+        hits_from = list(module_from)
+        hits_to = list(module_to)
+        for from_hit, to_hit in itertools.product(hits_from, hits_to):
+            seg = Segment(from_hit, to_hit)
+            segments.append(seg)
     
     N = len(segments)
     b = np.zeros(N)
@@ -204,7 +104,7 @@ def generate_hamiltonian_optimizedPAR(event, params):
     vectors = np.array([seg.to_vect() for seg in segments])
     norms = np.linalg.norm(vectors, axis=1)
 
-    eps = 1e-2  # Precision threshold
+    eps = 1e-9  # Precision threshold
 
     # Perform angular and bifurcation checks in parallel
     results = Parallel(n_jobs=-1, backend="loky")(
@@ -228,149 +128,53 @@ def generate_hamiltonian_optimizedPAR(event, params):
     A_ang = A_ang.tocsc()
     A_bif = A_bif.tocsc()
 
-    # Inhibitory interactions: penalize segments that share hits
-    hit_ids_from = np.array([seg.from_hit.id for seg in segments])
-    hit_ids_to = np.array([seg.to_hit.id for seg in segments])
-    shared_hits = (hit_ids_from[:, None] == hit_ids_from[None, :]) | (hit_ids_to[:, None] == hit_ids_to[None, :])
-    A_inh = sp.csc_matrix(shared_hits, dtype=int) * beta
-
-    print("Number of non-zero entries in A_ang:", A_ang.nnz)
-    print("Number of non-zero entries in A_ang:", A_bif.nnz)
-    print("Number of non-zero entries in A_ang:", A_inh.nnz)
+    # Inhibitory interactions: penalty for segments sharing the same hit
+    A_inh = dok_matrix((N, N), dtype=np.float64)
+    for i in range(N):
+        seg_i = segments[i]
+        for j in range(i + 1, N):
+            seg_j = segments[j]
+            if seg_i.from_hit == seg_j.from_hit or seg_i.to_hit == seg_j.to_hit:
+                A_inh[i, j] = beta
+                A_inh[j, i] = beta  # Symmetric
+    A_inh = A_inh.tocsc()
 
     # Combine matrices into the Hamiltonian
     A = -1 * (A_ang + A_bif + A_inh)
 
     return A, b, segments
+from event_model.event_model import event
+ # Assuming this imports the event class
+import json
+import os
 
-import numpy as np
-import scipy.sparse as sp
-from scipy.sparse import dok_matrix, csc_matrix
-import itertools  # Ensure itertools is imported
+# Load your real event data (assuming it's in JSON format)
+events_folder = 'events'
+filename = 'velo_event_2.json'
+file_path = os.path.join(events_folder, filename)
 
-def generate_hamiltonian_binary(event, params):
-    lambda_val = params.get('lambda', 1.0)
-    alpha = params.get('alpha', 1.0)   # Reward for angular consistency
-    beta = params.get('beta', 1.0)     # Penalty for conflicts
-    gamma = params.get('gamma', 1.0)   # Bias term for variable selection
-    eps = 1e-9  # Precision threshold
+# Load the JSON data
+with open(file_path, 'r') as f:
+    real_data_json = json.load(f)
 
-    # Sort modules by their z-coordinate
-    modules = sorted(event.modules, key=lambda a: a.z)
+# Create an event object
+eventt = event(real_data_json)
 
-    # Generate segments between consecutive modules
-    segments = [
-        Segment(from_hit, to_hit)
-        for idx in range(len(modules) - 1)
-        for from_hit, to_hit in itertools.product(modules[idx].hits(), modules[idx + 1].hits())
-    ]
-
-    N = len(segments)
-    h = gamma * np.ones(N)  # Bias terms (linear coefficients)
-    A = dok_matrix((N, N), dtype=np.float64)  # Interaction terms (quadratic coefficients)
-
-    # Precompute vectors and norms
-    vectors = np.array([seg.to_vect() for seg in segments])
-    norms = np.linalg.norm(vectors, axis=1)
-
-    # Populate interaction terms
-    for i in range(N):
-        vect_i = vectors[i]
-        norm_i = norms[i]
-        seg_i = segments[i]
-        for j in range(i + 1, N):
-            vect_j = vectors[j]
-            norm_j = norms[j]
-            seg_j = segments[j]
-            cosine = np.dot(vect_i, vect_j) / (norm_i * norm_j)
-
-            # Angular consistency reward (negative interaction)
-            if np.abs(cosine - 1) < eps:
-                A[i, j] -= alpha  # Negative value to reward selection
-                A[j, i] -= alpha
-
-            # Bifurcation penalty (positive interaction)
-            if (seg_i.from_hit == seg_j.from_hit and seg_i.to_hit != seg_j.to_hit) or \
-               (seg_i.from_hit != seg_j.from_hit and seg_i.to_hit == seg_j.to_hit):
-                A[i, j] += beta  # Positive value to penalize selection
-                A[j, i] += beta
-
-            # Inhibition penalty (positive interaction)
-            if (seg_i.from_hit == seg_j.from_hit) or (seg_i.to_hit == seg_j.to_hit):
-                A[i, j] += beta
-                A[j, i] += beta
-
-    # Convert A to the desired sparse format
-    A = A.tocsc()
-
-    return A, h, segments
-
-
-def check_modules_with_no_hits(event):
-    modules_with_no_hits = []
-    for idx, module in enumerate(event.modules):
-        hits_count = len(module.hits())
-        if hits_count == 0:
-            print(f"Module {idx}: z = {module.z}, has no hits.")
-            modules_with_no_hits.append(idx)
-        else:
-            print(f"Module {idx}: z = {module.z}, hits count = {hits_count}")
-    print(f"\nTotal Modules with No Hits: {len(modules_with_no_hits)}")
-    return modules_with_no_hits
-
-# Main execution
-event = Event(json_data)
-modules_with_no_hits = check_modules_with_no_hits(event)
+# Define your parameters
 params = {
-    'lambda': 100.0,
-    'alpha': 1.0,
-    'beta': 1.0
+    'lambda': 1.0,
+    'alpha': 1,
+    'beta': 1
 }
 
+# Generate the Hamiltonian
+A, b, segments = generate_hamiltonian_real_data(eventt, params)
 
-eps = 1e-2
-
-print("Computing Hamiltonian...")
-A, b, segments = event.compute_hamiltonian(generate_hamiltonian_binary, params)
-
-print("Hamiltonian matrix A:")
 print(A.toarray())
-print("Hamiltonian computed.")
 
+solution = qubosolverHr(A, b)
 
-import neal
-
-# Convert the sparse matrix A to a dictionary format
-def qubo_matrix_to_dict(A):
-    Q = {}
-    A_coo = A.tocoo()
-    for i, j, v in zip(A_coo.row, A_coo.col, A_coo.data):
-        if v != 0:
-            Q[(i, j)] = v
-    return Q
-
-print("Converting Hamiltonian matrix A to QUBO dictionary...")
-Q = qubo_matrix_to_dict(A)
-
-print("Solving QUBO problem using simulated annealing...")
-# Initialize the sampler
-sampler = neal.SimulatedAnnealingSampler()
-
-# Sample the QUBO
-sampleset = sampler.sample_qubo(Q, num_reads=100)
-
-# Get the best solution
-best_sample = sampleset.first.sample
-best_energy = sampleset.first.energy
-
-print("Best sample:")
-print(best_sample)
-print(f"Best energy: {best_energy}")
-
-
-
-# Analyze the solution
-selected_segments = [segments[i] for i in range(len(segments)) if best_sample[i] == 1]
+print(solution)
 
 
 
