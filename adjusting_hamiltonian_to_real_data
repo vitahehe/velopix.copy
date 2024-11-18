@@ -1,10 +1,12 @@
 import hashlib
 import numpy as np
 import itertools
-from scipy.sparse import lil_matrix, block_diag
+import scipy.sparse as sp
+from scipy.sparse import dok_matrix, csc_matrix
+from joblib import Parallel, delayed
 import json
 
-
+# Load JSON data
 filepath = 'C:/Users/Vita/Documents/GitHub/velopix.copy-1/events/velo_event_2.json'
 
 with open(filepath, 'r') as f:
@@ -15,7 +17,6 @@ print("Number of modules (from module_prefix_sum):", len(json_data["module_prefi
 print("Number of hits (from x, y, z arrays):", len(json_data["x"]))
 
 class Event(object):
-    '''Event defined by its json description.'''
     def __init__(self, json_data):
         self.number_of_modules = len(json_data["module_prefix_sum"]) - 1
         print("Event has {} modules.".format(self.number_of_modules))
@@ -54,8 +55,10 @@ class Event(object):
                 self.hits.append(new_hit)
                 module_hits.append(new_hit)
                 z_values.add(json_data["z"][i])
-            # Assuming each module has a single z value
-            module_z = z_values.pop() if len(z_values) == 1 else np.mean(list(z_values))
+            if len(module_hits) == 0:
+                module_z = float('nan')
+            else:
+                module_z = z_values.pop() if len(z_values) == 1 else np.mean(list(z_values))
             new_module = Module(
                 module_number=m,
                 z=module_z,
@@ -63,49 +66,13 @@ class Event(object):
             )
             self.modules.append(new_module)
 
-        # Print the total number of hits
         print("Total number of hits in event:", len(self.hits))
-        # Print the number of modules created
         print("Total number of modules in event:", len(self.modules))
 
     def compute_hamiltonian(self, hamiltonian_function, params):
-        '''Compute the Hamiltonian for the event using the provided hamiltonian_function.
-        
-        The hamiltonian_function should accept the event and params as arguments.
-        '''
         return hamiltonian_function(self, params)
 
-class Track(object):
-    '''A track, essentially a list of hits.'''
-    def __init__(self, hits):
-        self.hits = hits
-        self.missed_last_module = False
-        self.missed_penultimate_module = False
-
-    def add_hit(self, hit):
-        self.hits.append(hit)
-
-    def __repr__(self):
-        return "Track with " + str(len(self.hits)) + " hits: " + str(self.hits)
-
-    def __iter__(self):
-        return iter(self.hits)
-
-    def __eq__(self, other):
-        return self.hits == other.hits
-
-    def __ne__(self, other):
-        return not self.__eq__(other)
-
-    def __hash__(self):
-        return int.from_bytes(hashlib.sha256(
-            ''.join([str(h.id) for h in self.hits]).encode('utf-8')).digest(), byteorder='big')
-
 class Hit(object):
-    '''A hit, composed of an id and its x, y, and z coordinates.
-    It may optionally contain the number of the module where
-    the hit happened.
-    '''
     def __init__(self, x, y, z, hit_id, module=-1, t=0, with_t=False):
         self.x = x
         self.y = y
@@ -113,7 +80,7 @@ class Hit(object):
         self.t = t
         self.id = hit_id
         self.module_number = module
-        self.module_id = module  # Alias for module_number
+        self.module_id = module
         self.with_t = with_t
 
     def __getitem__(self, index):
@@ -142,13 +109,9 @@ class Hit(object):
         return self.id
 
 class Module(object):
-    '''A module is identified by its number.
-    It also contains the z coordinate where it sits and
-    the list of hits it holds.
-    '''
     def __init__(self, module_number, z, hits):
         self.module_number = int(module_number)
-        self.z = z  # Single z value
+        self.z = z
         self.hits_list = hits
 
     def __iter__(self):
@@ -164,13 +127,11 @@ class Module(object):
         return self.hits_list
 
 class Segment(object):
-    '''Represents a segment between two hits.'''
     def __init__(self, from_hit, to_hit):
         self.from_hit = from_hit
         self.to_hit = to_hit
 
     def to_vect(self):
-        '''Returns the vector from from_hit to to_hit.'''
         return np.array([
             self.to_hit.x - self.from_hit.x,
             self.to_hit.y - self.from_hit.y,
@@ -185,11 +146,15 @@ class Segment(object):
 
     def __repr__(self):
         return f"Segment(from_hit={self.from_hit.id}, to_hit={self.to_hit.id})"
-    
+
 import numpy as np
 import scipy.sparse as sp
 from scipy.sparse import dok_matrix, csc_matrix
 from joblib import Parallel, delayed
+import itertools  # Ensure itertools is imported
+
+# Ensure that the Segment class is defined or imported
+# from your_module import Segment
 
 def angular_and_bifurcation_checks(i, vectors, norms, segments, N, alpha, eps):
     """Performs angular consistency and bifurcation checks for a given index `i`."""
@@ -210,22 +175,22 @@ def angular_and_bifurcation_checks(i, vectors, norms, segments, N, alpha, eps):
 
         # Bifurcation consistency
         seg_i, seg_j = segments[i], segments[j]
-        if seg_i.from_hit.module_number == seg_j.from_hit.module_number and seg_i.to_hit.module_number != seg_j.to_hit.module_number:
+        if seg_i.from_hit == seg_j.from_hit and seg_i.to_hit != seg_j.to_hit:
             results_bif.append((i, j, -alpha))
-        elif seg_i.from_hit.module_number != seg_j.from_hit.module_number and seg_i.to_hit.module_number == seg_j.to_hit.module_number:
+        elif seg_i.from_hit != seg_j.from_hit and seg_i.to_hit == seg_j.to_hit:
             results_bif.append((i, j, -alpha))
 
     return results_ang, results_bif
 
 def generate_hamiltonian_optimizedPAR(event, params):
-    lambda_val = params.get('lambda')
-    alpha = params.get('alpha')
-    beta = params.get('beta')
+    lambda_val = params.get('lambda', 1.0)
+    alpha = params.get('alpha', 10.0)
+    beta = params.get('beta', 10.0)
 
-    # Sort modules by their z-coordinates
+    # Sort modules by their z-coordinate
     modules = sorted(event.modules, key=lambda a: a.z)
 
-    # Generate segments
+    # Generate segments between consecutive modules
     segments = [
         Segment(from_hit, to_hit)
         for idx in range(len(modules) - 1)
@@ -235,10 +200,13 @@ def generate_hamiltonian_optimizedPAR(event, params):
     N = len(segments)
     b = np.zeros(N)
 
+    # Precompute vectors and norms
     vectors = np.array([seg.to_vect() for seg in segments])
     norms = np.linalg.norm(vectors, axis=1)
 
-    eps = 1e-9  # Precision threshold
+    eps = 1e-2  # Precision threshold
+
+    # Perform angular and bifurcation checks in parallel
     results = Parallel(n_jobs=-1, backend="loky")(
         delayed(angular_and_bifurcation_checks)(i, vectors, norms, segments, N, alpha, eps)
         for i in range(N)
@@ -256,21 +224,89 @@ def generate_hamiltonian_optimizedPAR(event, params):
             A_bif[i, j] = value
             A_bif[j, i] = value  # Symmetric
 
- 
+    # Convert angular and bifurcation matrices to sparse format
     A_ang = A_ang.tocsc()
     A_bif = A_bif.tocsc()
 
+    # Inhibitory interactions: penalize segments that share hits
+    hit_ids_from = np.array([seg.from_hit.id for seg in segments])
+    hit_ids_to = np.array([seg.to_hit.id for seg in segments])
+    shared_hits = (hit_ids_from[:, None] == hit_ids_from[None, :]) | (hit_ids_to[:, None] == hit_ids_to[None, :])
+    A_inh = sp.csc_matrix(shared_hits, dtype=int) * beta
 
-    module_ids_from = np.array([seg.from_hit.module_number for seg in segments])
-    module_ids_to = np.array([seg.to_hit.module_number for seg in segments])
-    A_inh = sp.csc_matrix((module_ids_from == module_ids_to[:, None]), dtype=int) * beta
+    print("Number of non-zero entries in A_ang:", A_ang.nnz)
+    print("Number of non-zero entries in A_ang:", A_bif.nnz)
+    print("Number of non-zero entries in A_ang:", A_inh.nnz)
+
+    # Combine matrices into the Hamiltonian
     A = -1 * (A_ang + A_bif + A_inh)
 
     return A, b, segments
 
+import numpy as np
+import scipy.sparse as sp
+from scipy.sparse import dok_matrix, csc_matrix
+import itertools  # Ensure itertools is imported
+
+def generate_hamiltonian_binary(event, params):
+    lambda_val = params.get('lambda', 1.0)
+    alpha = params.get('alpha', 1.0)   # Reward for angular consistency
+    beta = params.get('beta', 1.0)     # Penalty for conflicts
+    gamma = params.get('gamma', 1.0)   # Bias term for variable selection
+    eps = 1e-9  # Precision threshold
+
+    # Sort modules by their z-coordinate
+    modules = sorted(event.modules, key=lambda a: a.z)
+
+    # Generate segments between consecutive modules
+    segments = [
+        Segment(from_hit, to_hit)
+        for idx in range(len(modules) - 1)
+        for from_hit, to_hit in itertools.product(modules[idx].hits(), modules[idx + 1].hits())
+    ]
+
+    N = len(segments)
+    h = gamma * np.ones(N)  # Bias terms (linear coefficients)
+    A = dok_matrix((N, N), dtype=np.float64)  # Interaction terms (quadratic coefficients)
+
+    # Precompute vectors and norms
+    vectors = np.array([seg.to_vect() for seg in segments])
+    norms = np.linalg.norm(vectors, axis=1)
+
+    # Populate interaction terms
+    for i in range(N):
+        vect_i = vectors[i]
+        norm_i = norms[i]
+        seg_i = segments[i]
+        for j in range(i + 1, N):
+            vect_j = vectors[j]
+            norm_j = norms[j]
+            seg_j = segments[j]
+            cosine = np.dot(vect_i, vect_j) / (norm_i * norm_j)
+
+            # Angular consistency reward (negative interaction)
+            if np.abs(cosine - 1) < eps:
+                A[i, j] -= alpha  # Negative value to reward selection
+                A[j, i] -= alpha
+
+            # Bifurcation penalty (positive interaction)
+            if (seg_i.from_hit == seg_j.from_hit and seg_i.to_hit != seg_j.to_hit) or \
+               (seg_i.from_hit != seg_j.from_hit and seg_i.to_hit == seg_j.to_hit):
+                A[i, j] += beta  # Positive value to penalize selection
+                A[j, i] += beta
+
+            # Inhibition penalty (positive interaction)
+            if (seg_i.from_hit == seg_j.from_hit) or (seg_i.to_hit == seg_j.to_hit):
+                A[i, j] += beta
+                A[j, i] += beta
+
+    # Convert A to the desired sparse format
+    A = A.tocsc()
+
+    return A, h, segments
+
 
 def check_modules_with_no_hits(event):
-
     modules_with_no_hits = []
     for idx, module in enumerate(event.modules):
         hits_count = len(module.hits())
@@ -279,25 +315,62 @@ def check_modules_with_no_hits(event):
             modules_with_no_hits.append(idx)
         else:
             print(f"Module {idx}: z = {module.z}, hits count = {hits_count}")
-    
     print(f"\nTotal Modules with No Hits: {len(modules_with_no_hits)}")
     return modules_with_no_hits
 
-
-
-
+# Main execution
 event = Event(json_data)
-c = check_modules_with_no_hits(event)
+modules_with_no_hits = check_modules_with_no_hits(event)
 params = {
     'lambda': 100.0,
     'alpha': 1.0,
     'beta': 1.0
-
 }
 
-print("Computing Hamiltonian...")
-A, b, segments = event.compute_hamiltonian(generate_hamiltonian_optimizedPAR, params)
 
-print(segments)
+eps = 1e-2
+
+print("Computing Hamiltonian...")
+A, b, segments = event.compute_hamiltonian(generate_hamiltonian_binary, params)
+
+print("Hamiltonian matrix A:")
 print(A.toarray())
 print("Hamiltonian computed.")
+
+
+import neal
+
+# Convert the sparse matrix A to a dictionary format
+def qubo_matrix_to_dict(A):
+    Q = {}
+    A_coo = A.tocoo()
+    for i, j, v in zip(A_coo.row, A_coo.col, A_coo.data):
+        if v != 0:
+            Q[(i, j)] = v
+    return Q
+
+print("Converting Hamiltonian matrix A to QUBO dictionary...")
+Q = qubo_matrix_to_dict(A)
+
+print("Solving QUBO problem using simulated annealing...")
+# Initialize the sampler
+sampler = neal.SimulatedAnnealingSampler()
+
+# Sample the QUBO
+sampleset = sampler.sample_qubo(Q, num_reads=100)
+
+# Get the best solution
+best_sample = sampleset.first.sample
+best_energy = sampleset.first.energy
+
+print("Best sample:")
+print(best_sample)
+print(f"Best energy: {best_energy}")
+
+
+
+# Analyze the solution
+selected_segments = [segments[i] for i in range(len(segments)) if best_sample[i] == 1]
+
+
+
