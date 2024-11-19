@@ -13,35 +13,41 @@ from event_model.event_model import event, track
 from validator import validator_lite as vl
 from copy import deepcopy
 import matplotlib.pyplot as plt
+from copy import deepcopy
+
+
 os.environ['DWAVE_API_TOKEN'] = 'DEV-b59f413d6a1407427e9f0079dd8e3cfb8106e58d'  
 
 def qubosolverHr(A, b):
+    print("\n[QUBO Solver] Starting QUBO Solver...")
     A = csc_matrix(A)
     bqm = dimod.BinaryQuadraticModel.empty(dimod.BINARY)
-    bqm.add_variables_from({i: b[i] for i in range(len(b))})
+    linear_terms = {i: b[i] for i in range(len(b))}
+    bqm.add_variables_from(linear_terms)
+    print(f"[QUBO Solver] Added {len(linear_terms)} linear terms.")
 
     row, col = A.nonzero()
+    print(f"[QUBO Solver] Non-zero interactions found: {len(row)}")
     for i, j in zip(row, col):
         if i != j:
             bqm.add_interaction(i, j, A[i, j])
         else:
             bqm.add_variable(i, A[i, j])
-
-    #print the statistics just to be sure whats happenijng
-    print(f"\n[QUBO Solver] BQM has {len(bqm.variables)} variables and {len(bqm.quadratic)} interactions.")
+    
+    print(f"[QUBO Solver] BQM has {len(bqm.variables)} variables and {len(bqm.quadratic)} interactions.")
 
     sampler = LeapHybridSampler()
     response = sampler.sample(bqm)
     best_sample = response.first.sample
-    sol_sample = np.array([best_sample[i] for i in range(len(b))], dtype=int)
+    sol_sample = np.array([best_sample.get(i, 0) for i in range(len(b))], dtype=int)
 
-    #solution statistics
+    # Solution statistics
     num_selected = np.sum(sol_sample)
     print(f"[QUBO Solver] Number of variables selected (value=1): {num_selected}")
 
     return sol_sample
 
-#define a segment class since its not in the event_model
+#not in the event_model
 class Segment:
     def __init__(self, from_hit, to_hit):
         if not from_hit or not to_hit:
@@ -57,12 +63,10 @@ class Segment:
         ])
 
     def length(self):
-
         vect = self.to_vect()
         return np.linalg.norm(vect)
 
     def normalized_vect(self):
-
         vect = self.to_vect()
         norm = np.linalg.norm(vect)
         if norm == 0:
@@ -76,12 +80,6 @@ class Segment:
     def __str__(self):
         return f"Segment from ({self.from_hit.x}, {self.from_hit.y}, {self.from_hit.z}) to ({self.to_hit.x}, {self.to_hit.y}, {self.to_hit.z})"
 
-import numpy as np
-import scipy.sparse as sp
-from scipy.sparse import dok_matrix, csc_matrix
-from joblib import Parallel, delayed
-import itertools
-
 def angular_and_bifurcation_checks(i, vectors, norms, segments, N, alpha, eps):
     results_ang = []
     results_bif = []
@@ -92,57 +90,63 @@ def angular_and_bifurcation_checks(i, vectors, norms, segments, N, alpha, eps):
     for j in range(i + 1, N):  
         vect_j = vectors[j]
         norm_j = norms[j]
-        cosine = np.dot(vect_i, vect_j) / (norm_i * norm_j)
+        cosine = np.dot(vect_i, vect_j) / (norm_i * norm_j) if (norm_i != 0 and norm_j != 0) else 0
 
         # Angular consistency
         if np.abs(cosine - 1) < eps:
             results_ang.append((i, j, -1))
+            print(f"[angular_and_bifurcation_checks] Angular consistency between segments {i} and {j}.")
 
         # Bifurcation consistency
         seg_i, seg_j = segments[i], segments[j]
         if seg_i.from_hit == seg_j.from_hit and seg_i.to_hit != seg_j.to_hit:
             results_bif.append((i, j, alpha))
+            print(f"[angular_and_bifurcation_checks] Bifurcation detected between segments {i} and {j} (same from_hit).")
         elif seg_i.from_hit != seg_j.from_hit and seg_i.to_hit == seg_j.to_hit:
             results_bif.append((i, j, alpha))
+            print(f"[angular_and_bifurcation_checks] Bifurcation detected between segments {i} and {j} (same to_hit).")
 
     return results_ang, results_bif
-
 
 def generate_hamiltonian_real_data(event, params):
     lambda_val = params.get('lambda', 1.0)
     alpha = params.get('alpha', 1.0)
     beta = params.get('beta', 1.0)
 
-#Sort modules by their z-coordinate
+    # Sort modules by their z-coordinate
     modules = sorted(event.modules, key=lambda m: m.z)
+    print("[generate_hamiltonian_real_data] Modules sorted by z-coordinate.")
+    print(f"[generate_hamiltonian_real_data] Number of modules: {len(modules)}")
 
-#generate segments skipping over modules without hits
+    # Generate segments skipping over modules without hits
     segments = []
     for idx in range(len(modules) - 1):
         current_module = modules[idx]
         next_idx = idx + 1
         while next_idx < len(modules) and not modules[next_idx].hits():
+            print(f"[generate_hamiltonian_real_data] Skipping module {next_idx} due to no hits.")
             next_idx += 1
 
-        #no valid next module with hits, just break
+        # No valid next module with hits, just break
         if next_idx >= len(modules):
+            print(f"[generate_hamiltonian_real_data] No more modules with hits after module {idx}.")
             break
 
         hits_current = current_module.hits()
         hits_next = modules[next_idx].hits()
 
-        #skip if no hits on a modules
+        # Skip if no hits on a module
         if not hits_current:
+            print(f"[generate_hamiltonian_real_data] No hits in current module {idx}. Skipping.")
             continue
 
-        #segments between hits in the current and next module
-        segments.extend(Segment(from_hit, to_hit) for from_hit, to_hit in itertools.product(hits_current, hits_next))
-
-        print(f"Generated {len(segments)} segments.")
-
+        # Segments between hits in the current and next module
+        new_segments = list(itertools.product(hits_current, hits_next))
+        segments.extend(Segment(from_hit, to_hit) for from_hit, to_hit in new_segments)
+        print(f"[generate_hamiltonian_real_data] Generated {len(new_segments)} segments between module {idx} and {next_idx}.")
 
     N = len(segments)
-    print(f"[Hamiltonian Generation] Number of segments generated: {N}")
+    print(f"[generate_hamiltonian_real_data] Total number of segments generated: {N}")
 
     vectors = np.array([seg.to_vect() for seg in segments])
     norms = np.linalg.norm(vectors, axis=1)
@@ -174,87 +178,130 @@ def generate_hamiltonian_real_data(event, params):
             if seg_i.from_hit == seg_j.from_hit or seg_i.to_hit == seg_j.to_hit:
                 A_inh[i, j] = beta
                 A_inh[j, i] = beta
+                print(f"[generate_hamiltonian_real_data] Inherent interaction between segments {i} and {j}.")
+
     A_inh = A_inh.tocsc()
 
-    # Combine Hamiltonian components
     A = lambda_val * (A_ang + A_bif + A_inh)
+    print(f"[generate_hamiltonian_real_data] Hamiltonian matrix A: shape {A.shape}, non-zero elements: {np.count_nonzero(A)}")
 
-    #Hamiltonian statistics
-    print(f"[Hamiltonian Generation] Hamiltonian matrix A: shape {A.shape}, non-zero elements: {A.count_nonzero()}")
     return A, np.zeros(N), segments
 
-def generate_hamiltonian(event, params):
-    lambda_val = params.get('lambda', 1.0)
-    alpha = params.get('alpha', 1.0)
-    beta = params.get('beta', 1.0)
-    modules = sorted(event.modules, key=lambda m: m.z)
+import numpy as np
+import itertools
+from copy import deepcopy
 
-#generate segments skipping over modules without hits
+
+def generate_hamiltonian(event, params):
+    print("\n[generate_hamiltonian] Starting Hamiltonian generation...")
+    lambda_val = params.get('lambda')
+    alpha = params.get('alpha')
+    beta = params.get('beta')
+
+    modules = deepcopy(event.modules)
+    modules.sort(key=lambda module: module.z)
+    print("[generate_hamiltonian] Modules deep-copied and sorted by z-coordinate.")
+    print(f"[generate_hamiltonian] Number of modules after sorting: {len(modules)}")
+
+
     segments = []
     for idx in range(len(modules) - 1):
         current_module = modules[idx]
-        next_idx = idx + 1
-        while next_idx < len(modules) and not modules[next_idx].hits():
-            next_idx += 1
-
-        #no valid next module with hits, just break
-        if next_idx >= len(modules):
-            break
-
+        next_module = modules[idx + 1]
         hits_current = current_module.hits()
-        hits_next = modules[next_idx].hits()
-
-        #skip if no hits on a modules
-        if not hits_current:
-            continue
-
-        #segments between hits in the current and next module
-        segments.extend(Segment(from_hit, to_hit) for from_hit, to_hit in itertools.product(hits_current, hits_next))
-
-        print(f"Generated {len(segments)} segments.")
+        hits_next = next_module.hits()
+        segments_generated = 0
+        for from_hit, to_hit in itertools.product(hits_current, hits_next):
+            try:
+                segment = Segment(from_hit, to_hit)
+                segments.append(segment)
+                segments_generated += 1
+            except ValueError as e:
+                print(f"[generate_hamiltonian] Skipping invalid segment between Hit {from_hit.id} and Hit {to_hit.id}: {e}")
+        print(f"[generate_hamiltonian] Generated {segments_generated} segments between module {idx} and module {idx + 1}.")
 
     N = len(segments)
+    print(f"[generate_hamiltonian] Total number of segments generated: {N}")
+
+    if N == 0:
+        print("[generate_hamiltonian] No segments generated. Returning empty Hamiltonian.")
+        return np.zeros((0,0)), np.zeros(0), segments
+
+
     A_ang = np.zeros((N, N))
     A_bif = np.zeros((N, N))
     A_inh = np.zeros((N, N))
+    
     b = np.zeros(N)
-
-    eps = 1e-3  # Adjusted threshold
-
+    s_ab = np.zeros((N, N), dtype=int)
+    print("[generate_hamiltonian] Initializing s_ab matrix based on module numbers.")
     for i, seg_i in enumerate(segments):
-        for j in range(i + 1, N):
-            seg_j = segments[j]
+        for j, seg_j in enumerate(segments):
+            try:
+                s_ab[i, j] = int(seg_i.from_hit.module_number == 1 and seg_j.to_hit.module_number == 1)
+            except AttributeError as e:
+                print(f"[generate_hamiltonian] AttributeError for segments {i}, {j}: {e}")
+                print(f"Segment {i}: {seg_i}")
+                print(f"Segment {j}: {seg_j}")
 
-            # Angular consistency
-            vect_i = seg_i.to_vect()
-            vect_j = seg_j.to_vect()
-            cosine = np.dot(vect_i, vect_j) / (np.linalg.norm(vect_i) * np.linalg.norm(vect_j))
+    #debugg
+    print("[generate_hamiltonian] Sample s_ab matrix entries:")
+    for i in range(min(N, 3)):
+        for j in range(min(N, 3)):
+            print(f"s_ab[{i}, {j}] = {s_ab[i, j]}")
 
-            if np.abs(cosine - 1) < eps:
-                A_ang[i, j] += -1  # Negative weight to encourage selection
-                A_ang[j, i] = A_ang[i, j]  # Symmetric
+    #apply conditions
+    print("[generate_hamiltonian] Populating A_ang, A_bif, and A_inh matrices.")
+    for i, seg_i in enumerate(segments):
+        for j, seg_j in enumerate(segments):
+            if i != j:
+                vect_i = seg_i.to_vect()
+                vect_j = seg_j.to_vect()
+                norm_i = np.linalg.norm(vect_i)
+                norm_j = np.linalg.norm(vect_j)
+                
+                # Avoid division by zero
+                if norm_i == 0 or norm_j == 0:
+                    cosine = 0
+                    print(f"[generate_hamiltonian] Warning: Zero-length vector detected for segments {i} or {j}.")
+                else:
+                    cosine = np.dot(vect_i, vect_j) / (norm_i * norm_j)
 
-            # Bifurcation penalties
-            if (seg_i.from_hit == seg_j.from_hit) and (seg_i.to_hit != seg_j.to_hit):
-                A_bif[i, j] += alpha  # Positive penalty
-                A_bif[j, i] = A_bif[i, j]  # Symmetric
+                eps = 1e-9
 
-            if (seg_i.from_hit != seg_j.from_hit) and (seg_i.to_hit == seg_j.to_hit):
-                A_bif[i, j] += alpha  # Positive penalty
-                A_bif[j, i] = A_bif[i, j]  # Symmetric
+                # Populate A_ang if vectors are parallel
+                if np.abs(cosine - 1) < eps:
+                    A_ang[i, j] = 1
+                    print(f"[generate_hamiltonian] A_ang[{i}, {j}] set to 1 (angular consistency).")
 
-            # Inhibitory interactions
-            if (seg_i.from_hit == seg_j.from_hit) or (seg_i.to_hit == seg_j.to_hit):
-                A_inh[i, j] += beta  # Positive penalty
-                A_inh[j, i] = A_inh[i, j]  # Symmetric
+                # Populate A_bif for bifurcations
+                if (seg_i.from_hit == seg_j.from_hit) and (seg_i.to_hit != seg_j.to_hit):
+                    A_bif[i, j] = -alpha
+                    print(f"[generate_hamiltonian] A_bif[{i}, {j}] set to -{alpha} (bifurcation: same from_hit).")
+                if (seg_i.from_hit != seg_j.from_hit) and (seg_i.to_hit == seg_j.to_hit):
+                    A_bif[i, j] = -alpha
+                    print(f"[generate_hamiltonian] A_bif[{i}, {j}] set to -{alpha} (bifurcation: same to_hit).")
 
-    A = A_ang + A_bif + A_inh
+                # Populate A_inh based on s_ab
+                A_inh[i, j] = s_ab[i, j] * s_ab[j, i] * beta
+                if A_inh[i, j] != 0:
+                    print(f"[generate_hamiltonian] A_inh[{i}, {j}] set to {A_inh[i, j]} (inherent interaction).")
 
+    # Compute the final Hamiltonian matrix
+    A = -1 * (A_ang + A_bif + A_inh)
+    print("[generate_hamiltonian] Combined A_ang, A_bif, and A_inh into final Hamiltonian matrix A.")
+
+    # Store components for reference
+    components = {'A_ang': -A_ang, 'A_bif': -A_bif, 'A_inh': -A_inh}
+
+    # Print Hamiltonian matrix statistics
+    print(f"[generate_hamiltonian] Hamiltonian matrix A shape: {A.shape}")
+    print(f"[generate_hamiltonian] Hamiltonian matrix A has {np.count_nonzero(A)} non-zero elements.")
 
     return A, b, segments
 
 def visualize_segments(segments):
-
+    print("[visualize_segments] Visualizing segments...")
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
     ax.set_title("Constructed Segments")
@@ -262,14 +309,15 @@ def visualize_segments(segments):
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
 
-    for seg in segments:
+    for idx, seg in enumerate(segments):
         x = [seg.from_hit.x, seg.to_hit.x]
         y = [seg.from_hit.y, seg.to_hit.y]
         z = [seg.from_hit.z, seg.to_hit.z]
-        ax.plot(x, y, z, color="purple", linestyle="-", label="Segment" if seg == segments[0] else "")
+        ax.plot(x, y, z, color="purple", linestyle="-", label="Segment" if idx == 0 else "")
 
     ax.legend()
     plt.show()
+    print("[visualize_segments] Visualization complete.")
 
 def find_segments(s0, active):
     found_s = []
@@ -281,47 +329,59 @@ def find_segments(s0, active):
     return found_s
 
 def get_qubo_solution(sol_sample, event, segments):
-    print(f"sol_sample: {sol_sample}")
-    print(f"Number of segments: {len(segments)}")
+    print("\n[get_qubo_solution] Processing QUBO solution...")
+    print(f"[get_qubo_solution] sol_sample: {sol_sample}")
+    print(f"[get_qubo_solution] Number of segments: {len(segments)}")
     
-    active_segments = [segment for segment, pseudo_state in zip(segments, sol_sample) if pseudo_state > np.min(sol_sample)]
-    print(f"Active segments count: {len(active_segments)}")
+    # Selecting segments where sol_sample is 1
+    active_segments = [segment for segment, pseudo_state in zip(segments, sol_sample) if pseudo_state == 1]
+    print(f"[get_qubo_solution] Active segments count: {len(active_segments)}")
+    
     active = deepcopy(active_segments)
     tracks = []
 
-
     while len(active):
         s = active.pop()
+        print(f"[get_qubo_solution] Starting new track with segment: {s}")
         nextt = find_segments(s, active)
         track_hits = set([s.from_hit.id, s.to_hit.id])
+        print(f"[get_qubo_solution] Initial track hits: {track_hits}")
+
         while len(nextt):
             s = nextt.pop()
             try:
                 active.remove(s)
+                print(f"[get_qubo_solution] Added segment to track: {s}")
             except ValueError:
+                print(f"[get_qubo_solution] Segment {s} not found in active list.")
                 pass
             nextt += find_segments(s, active)
             track_hits = track_hits.union(set([s.from_hit.id, s.to_hit.id]))
+            print(f"[get_qubo_solution] Updated track hits: {track_hits}")
+
         tracks.append(track_hits)
+        print(f"[get_qubo_solution] Completed track with hits: {track_hits}")
 
-
-    print(f"Generated {len(tracks)} tracks.")
+    print(f"[get_qubo_solution] Generated {len(tracks)} tracks.")
     
-    #convert hit IDs to track objects
+    # Convert hit IDs to track objects
     tracks_processed = []
-    for track_hit_ids in tracks:
-        hits = [list(filter(lambda b: b.id == a, event.hits))[0] for a in track_hit_ids]
-        tracks_processed.append(track(hits))  
-        print(f"Track processed: {hits}")
-    
+    for idx, track_hit_ids in enumerate(tracks):
+        try:
+            hits = [next(filter(lambda b: b.id == a, event.hits)) for a in track_hit_ids]
+            tracks_processed.append(track(hits))  
+            print(f"[get_qubo_solution] Track {idx+1} processed: {hits}")
+        except StopIteration as e:
+            print(f"[get_qubo_solution] Error: Hit ID not found in event.hits for track {idx+1}: {e}")
+
     return tracks_processed
 
-
 def main():
+    print("[Main] Starting main function...")
     params = {
         'lambda': 1.0,
-        'alpha': 10.0,
-        'beta': 10.0
+        'alpha': 1.0,
+        'beta': 1.0
     }
 
     solutions = {
@@ -329,38 +389,87 @@ def main():
     }
     validation_data = []
 
+    event_files_processed = 0
+
     for (dirpath, dirnames, filenames) in os.walk("events"):
         for i, filename in enumerate(filenames):
             if i != 2:
-               continue
+               print(f"[Main] Skipping file {i}: {filename}")
+               continue  # Processes only the third file (0-based indexing)
             file_path = os.path.realpath(os.path.join(dirpath, filename))
+            print(f"\n[Main] Loading event from file: {file_path}")
             with open(file_path, 'r') as f:
-                json_data = json.load(f)
-            event_instance = event(json_data)
+                try:
+                    json_data = json.load(f)
+                    print(f"[Main] Successfully loaded JSON data for {filename}.")
+                except json.JSONDecodeError as e:
+                    print(f"[Main] Error decoding JSON from {filename}: {e}")
+                    continue
+
+            try:
+                event_instance = event(json_data)
+                print(f"[Main] Event instance created successfully.")
+            except Exception as e:
+                print(f"[Main] Error initializing Event for {filename}: {e}")
+                continue
+
             print(f"\n[Main] Processing event {filename}")
             print(f"[Main] Number of modules in event: {len(event_instance.modules)}")
             total_hits = sum(len(list(m)) for m in event_instance.modules)
             print(f"[Main] Total number of hits in event: {total_hits}")
 
             print(f"[Main] Reconstructing event {i}...")
-            A, b, segments = generate_hamiltonian(event_instance, params)
-            visualize_segments(segments)
-            #use for debugging the optimized ham
-            #if A.count_nonzero() == 0:
-                #print("[Main] Hamiltonian matrix A is empty. Skipping event.")
-                #continue
+            try:
+                A, b, segments = generate_hamiltonian(event_instance, params)
+                print(f"[Main] Hamiltonian generated with shape {A.shape} and {np.count_nonzero(A)} non-zero elements.")
+                if len(segments) > 0:
+                    print(f"[Main] Number of segments: {len(segments)}")
+                    print("[Main] Sample segments:")
+                    for seg in segments[:5]:
+                        print(seg)
+                else:
+                    print("[Main] No segments generated.")
+            except Exception as e:
+                print(f"[Main] Error generating Hamiltonian for {filename}: {e}")
+                continue
 
-        
-            sol_sample = qubosolverHr(A, b)
-            tracks = get_qubo_solution(sol_sample, event_instance, segments)
-            print(f"[Main] Number of tracks reconstructed: {len(tracks)}")
-            solutions["qubo_track_reconstruction"].append(tracks)
-            validation_data.append(json_data)
+            print("[Main] Visualizing segments...")
+            try:
+                visualize_segments(segments)
+            except Exception as e:
+                print(f"[Main] Error visualizing segments for {filename}: {e}")
 
-    for k, v in sorted(solutions.items()):
-        print(f"\n[Validation] Validating tracks from {k}:")
-        vl.validate_print(validation_data, v)
-        print()
+            # Use for debugging the optimized Hamiltonian
+            # if A.count_nonzero() == 0:
+                # print("[Main] Hamiltonian matrix A is empty. Skipping event.")
+                # continue
+
+            try:
+                sol_sample = qubosolverHr(A, b)
+                print("[Main] QUBO Solver completed.")
+            except Exception as e:
+                print(f"[Main] Error during QUBO solving for {filename}: {e}")
+                continue
+
+            try:
+                tracks = get_qubo_solution(sol_sample, event_instance, segments)
+                print(f"[Main] Number of tracks reconstructed: {len(tracks)}")
+                solutions["qubo_track_reconstruction"].append(tracks)
+                validation_data.append(json_data)
+                event_files_processed += 1
+            except Exception as e:
+                print(f"[Main] Error processing QUBO solution for {filename}: {e}")
+                continue
+
+    if event_files_processed == 0:
+        print("[Main] Warning: No events were successfully processed.")
+    else:
+        for k, v in sorted(solutions.items()):
+            print(f"\n[Validation] Validating tracks from {k}:")
+            vl.validate_print(validation_data, v)
+            print()
+
+    print(f"\n[Main] Total events processed: {event_files_processed}")
 
 if __name__ == "__main__":
     main()
