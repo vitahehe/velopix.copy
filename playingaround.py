@@ -19,12 +19,7 @@ from copy import deepcopy
 
 
 def visualize_segments(segments):
-    """
-    Visualize the segments constructed during Hamiltonian generation.
 
-    Args:
-        segments (list of Segment): List of segments to visualize.
-    """
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
     ax.set_title("Constructed Segments")
@@ -117,25 +112,14 @@ def qubosolverHr(A, b):
 
 class Segment:
     def __init__(self, from_hit, to_hit):
-        """
-        Initialize a Segment connecting two hits.
 
-        Args:
-            from_hit (Hit): The starting hit of the segment.
-            to_hit (Hit): The ending hit of the segment.
-        """
         if not from_hit or not to_hit:
             raise ValueError("Both from_hit and to_hit must be valid Hit objects.")
         self.from_hit = from_hit
         self.to_hit = to_hit
 
     def to_vect(self):
-        """
-        Returns the vector representation of the segment.
 
-        Returns:
-            np.ndarray: A 3D vector [dx, dy, dz] from from_hit to to_hit.
-        """
         return np.array([
             self.to_hit.x - self.from_hit.x,
             self.to_hit.y - self.from_hit.y,
@@ -143,22 +127,10 @@ class Segment:
         ])
 
     def length(self):
-        """
-        Compute the Euclidean length (norm) of the segment.
-
-        Returns:
-            float: The length of the segment.
-        """
         vect = self.to_vect()
         return np.linalg.norm(vect)
 
     def normalized_vect(self):
-        """
-        Returns the normalized vector representation of the segment.
-
-        Returns:
-            np.ndarray: A unit vector [dx, dy, dz] from from_hit to to_hit.
-        """
         vect = self.to_vect()
         norm = np.linalg.norm(vect)
         if norm == 0:
@@ -183,22 +155,20 @@ def angular_and_bifurcation_checks(i, vectors, norms, segments, N, alpha, eps):
     results_ang = []
     results_bif = []
 
-    # Normalize vector i
+    # Normalize all the vectors and take care of 0devision case
     vect_i = vectors[i]
     norm_i = norms[i]
     if norm_i == 0:
         raise ValueError(f"Zero-length vector encountered at index {i}")
-    vect_i_normalized = vect_i / norm_i  # Normalize vect_i
+    vect_i_normalized = vect_i / norm_i  
 
     for j in range(i + 1, N):
-        # Normalize vector j
         vect_j = vectors[j]
         norm_j = norms[j]
         if norm_j == 0:
             raise ValueError(f"Zero-length vector encountered at index {j}")
         vect_j_normalized = vect_j / norm_j
 
-        # Angular consistency (cosine similarity)
         cosine = np.dot(vect_i_normalized, vect_j_normalized)
         if np.abs(cosine - 1) < eps:
             results_ang.append((i, j, -1))  # Add angular consistency interaction
@@ -218,49 +188,40 @@ def generate_hamiltonian_real_data(event, params):
     alpha = params.get('alpha', 1.0)
     beta = params.get('beta', 1.0)
 
-    # Filter hits by their z-coordinate and sort them
-    hits = sorted(event.hits, key=lambda h: h.z)
-    z_tolerance = 1e-3  # Adjust based on the precision of your data
+#Sort modules by their z-coordinate
+    modules = sorted(event.modules, key=lambda m: m.z)
 
-    # Group hits by approximate z values
-    z_groups = defaultdict(list)
-    for hit in hits:
-        z_key = round(hit.z / z_tolerance) * z_tolerance  # Normalize z into groups
-        z_groups[z_key].append(hit)
-
-    # Sort the z keys and filter out empty layers
-    z_sorted_keys = sorted(z_groups.keys())
-    z_sorted_keys = [key for key in z_sorted_keys if len(z_groups[key]) > 0]
-    print(f"[Hamiltonian Generation] Number of z groups (non-empty only): {len(z_sorted_keys)}")
-
-    # Debugging: Visualize hits grouped by z
-    for z_key in z_sorted_keys:
-        group_hits = z_groups[z_key]
-        print(f"Layer {z_key}: {len(group_hits)} hits")
-
-    # Generate segments only between nearest layers
+#generate segments skipping over modules without hits
     segments = []
-    seen_segments = set()
-    for i in range(len(z_sorted_keys) - 1):
-        z_group_1 = z_groups[z_sorted_keys[i]]
-        z_group_2 = z_groups[z_sorted_keys[i + 1]]
-        for from_hit, to_hit in itertools.product(z_group_1, z_group_2):
-            seg_hash = (from_hit.id, to_hit.id)
-            # Ensure segments are unique and follow strict layer adjacency
-            if seg_hash not in seen_segments and abs(from_hit.z - to_hit.z) <= z_tolerance:
-                seen_segments.add(seg_hash)
-                segments.append(Segment(from_hit, to_hit))
+    for idx in range(len(modules) - 1):
+        current_module = modules[idx]
+        next_idx = idx + 1
+        while next_idx < len(modules) and not modules[next_idx].hits():
+            next_idx += 1
 
-    # Check the total number of segments
+        #no valid next module with hits, just break
+        if next_idx >= len(modules):
+            break
+
+        hits_current = current_module.hits()
+        hits_next = modules[next_idx].hits()
+
+        #skip if no hits on a modules
+        if not hits_current:
+            continue
+
+        #segments between hits in the current and next module
+        segments.extend(Segment(from_hit, to_hit) for from_hit, to_hit in itertools.product(hits_current, hits_next))
+
+        print(f"Generated {len(segments)} segments.")
+
+
     N = len(segments)
     print(f"[Hamiltonian Generation] Number of segments generated: {N}")
 
-    # Generate vectors and norms for consistency checks
     vectors = np.array([seg.to_vect() for seg in segments])
     norms = np.linalg.norm(vectors, axis=1)
     eps = 1e-9
-
-    # Perform angular and bifurcation consistency checks
     results = Parallel(n_jobs=-1, backend="loky")(
         delayed(angular_and_bifurcation_checks)(i, vectors, norms, segments, N, alpha, eps)
         for i in range(N)
@@ -269,7 +230,6 @@ def generate_hamiltonian_real_data(event, params):
     A_ang = dok_matrix((N, N), dtype=np.float64)
     A_bif = dok_matrix((N, N), dtype=np.float64)
 
-    # Aggregate angular and bifurcation results
     for ang_results, bif_results in results:
         for i, j, value in ang_results:
             A_ang[i, j] = value
@@ -281,7 +241,6 @@ def generate_hamiltonian_real_data(event, params):
     A_ang = A_ang.tocsc()
     A_bif = A_bif.tocsc()
 
-    # Penalize overlapping segments
     A_inh = dok_matrix((N, N), dtype=np.float64)
     for i in range(N):
         seg_i = segments[i]
@@ -295,10 +254,11 @@ def generate_hamiltonian_real_data(event, params):
     # Combine Hamiltonian components
     A = lambda_val * (A_ang + A_bif + A_inh)
 
-    # Debugging: Print Hamiltonian statistics
+    #Hamiltonian statistics
     print(f"[Hamiltonian Generation] Hamiltonian matrix A: shape {A.shape}, non-zero elements: {A.count_nonzero()}")
     return A, np.zeros(N), segments
 
+#function just to see whats up with the solutions
 def calculate_residuals(reconstructed_tracks, ground_truth_particles):
 
     residuals = []
@@ -307,7 +267,6 @@ def calculate_residuals(reconstructed_tracks, ground_truth_particles):
         min_residual = float('inf')
 
         for true_particle in ground_truth_particles:
-            # Compare the hit IDs in the reconstructed track and the true particle
             rec_hit_ids = set(hit.id for hit in rec_track.hits)
             true_hit_ids = set(hit.id for hit in true_particle.velohits)
             common_hits = rec_hit_ids & true_hit_ids
@@ -331,21 +290,20 @@ def visualize_tracks(reconstructed_tracks, ground_truth_particles, event, residu
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
 
-    # Plot reconstructed tracks
+    #reconstructed track coppied
     for track in reconstructed_tracks:
         x = [hit.x for hit in track.hits]
         y = [hit.y for hit in track.hits]
         z = [hit.z for hit in track.hits]
         ax.plot(x, y, z, linestyle="--", color="red", label="Reconstructed Track" if track == reconstructed_tracks[0] else "")
 
-    # Plot true tracks (ground truth particles)
+    #true particle tracks plotting
     for particle in ground_truth_particles:
         x = [hit.x for hit in particle.velohits]
         y = [hit.y for hit in particle.velohits]
         z = [hit.z for hit in particle.velohits]
         ax.plot(x, y, z, linestyle="-", color="blue", label="True Track" if particle == ground_truth_particles[0] else "")
 
-    # Plot residual mismatches
     for rec_track, true_particle, residual in residuals:
         if true_particle is None or residual > 0:
             x = [hit.x for hit in rec_track.hits]
@@ -355,7 +313,7 @@ def visualize_tracks(reconstructed_tracks, ground_truth_particles, event, residu
 
     ax.legend()
     plt.show()
-
+#combines everything, compares and plots correct and found solutions
 def main():
     params = {
         'lambda': 1.0,
@@ -368,10 +326,8 @@ def main():
     }
     validation_data = []
 
-    # Iterate through events
     for (dirpath, dirnames, filenames) in os.walk("events"):
         for i, filename in enumerate(filenames):
-            # Adjust this condition to process specific files or all events
             if i != 2:
                 continue
 
@@ -395,38 +351,35 @@ def main():
             solutions["qubo_track_reconstruction"].append(reconstructed_tracks)
             validation_data.append(json_data)
 
-            # Validation and residual analysis
             validator_event_instance = vl.parse_json_data(json_data)
             weights = vl.comp_weights(reconstructed_tracks, validator_event_instance)
             t2p, p2t = vl.hit_purity(reconstructed_tracks, validator_event_instance.particles, weights)
 
-            # Calculate residuals
+
             residuals = calculate_residuals(reconstructed_tracks, validator_event_instance.particles)
 
-            # Print residuals
+
             print("\n[Residual Analysis]")
             for rec_track, true_particle, residual in residuals:
                 print(f"Reconstructed Track: {rec_track}")
                 print(f"Associated Particle: {true_particle}")
                 print(f"Residual: {residual}")
 
-            # Visualize reconstructed vs true tracks
             visualize_tracks(reconstructed_tracks, validator_event_instance.particles, event_instance, residuals)
 
-            # Evaluate performance metrics
-            ghost_rate_value = vl.validate_ghost_fraction([json_data], [reconstructed_tracks])
-            clone_fraction = vl.validate_clone_fraction([json_data], [reconstructed_tracks])
-            reconstruction_efficiency = vl.validate_efficiency([json_data], [reconstructed_tracks])
+            #ghost_rate_value = vl.validate_ghost_fraction([json_data], [reconstructed_tracks])
+            #clone_fraction = vl.validate_clone_fraction([json_data], [reconstructed_tracks])
+            #reconstruction_efficiency = vl.validate_efficiency([json_data], [reconstructed_tracks])
 
             print("\n[Validation Metrics]")
-            print(f"Ghost Rate: {ghost_rate_value:.2%}")
-            print(f"Clone Fraction: {clone_fraction:.2%}")
-            print(f"Reconstruction Efficiency: {reconstruction_efficiency:.2%}")
+            #print(f"Ghost Rate: {ghost_rate_value:.2%}")
+            #print(f"Clone Fraction: {clone_fraction:.2%}")
+            #print(f"Reconstruction Efficiency: {reconstruction_efficiency:.2%}")
 
-    # Final validation printout
     for k, v in sorted(solutions.items()):
         print(f"\n[Validation Summary] Validating tracks from {k}:")
         vl.validate_print(validation_data, v)
         print()
 
-#if __name__ == "__main__":
+if __name__ == "__main__":
+    main()

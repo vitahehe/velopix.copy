@@ -44,25 +44,12 @@ def qubosolverHr(A, b):
 #define a segment class since its not in the event_model
 class Segment:
     def __init__(self, from_hit, to_hit):
-        """
-        Initialize a Segment connecting two hits.
-
-        Args:
-            from_hit (Hit): The starting hit of the segment.
-            to_hit (Hit): The ending hit of the segment.
-        """
         if not from_hit or not to_hit:
             raise ValueError("Both from_hit and to_hit must be valid Hit objects.")
         self.from_hit = from_hit
         self.to_hit = to_hit
 
     def to_vect(self):
-        """
-        Returns the vector representation of the segment.
-
-        Returns:
-            np.ndarray: A 3D vector [dx, dy, dz] from from_hit to to_hit.
-        """
         return np.array([
             self.to_hit.x - self.from_hit.x,
             self.to_hit.y - self.from_hit.y,
@@ -70,22 +57,12 @@ class Segment:
         ])
 
     def length(self):
-        """
-        Compute the Euclidean length (norm) of the segment.
 
-        Returns:
-            float: The length of the segment.
-        """
         vect = self.to_vect()
         return np.linalg.norm(vect)
 
     def normalized_vect(self):
-        """
-        Returns the normalized vector representation of the segment.
 
-        Returns:
-            np.ndarray: A unit vector [dx, dy, dz] from from_hit to to_hit.
-        """
         vect = self.to_vect()
         norm = np.linalg.norm(vect)
         if norm == 0:
@@ -130,51 +107,46 @@ def angular_and_bifurcation_checks(i, vectors, norms, segments, N, alpha, eps):
 
     return results_ang, results_bif
 
+
 def generate_hamiltonian_real_data(event, params):
     lambda_val = params.get('lambda', 1.0)
     alpha = params.get('alpha', 1.0)
     beta = params.get('beta', 1.0)
 
-# Sort modules by their z-coordinate
+#Sort modules by their z-coordinate
     modules = sorted(event.modules, key=lambda m: m.z)
 
-# Generate segments, skipping over modules without hits
+#generate segments skipping over modules without hits
     segments = []
     for idx in range(len(modules) - 1):
         current_module = modules[idx]
-        # Find the next module with hits
         next_idx = idx + 1
         while next_idx < len(modules) and not modules[next_idx].hits():
             next_idx += 1
 
-        # If no valid next module with hits, break
+        #no valid next module with hits, just break
         if next_idx >= len(modules):
             break
 
-        # Current and next modules' hits
         hits_current = current_module.hits()
         hits_next = modules[next_idx].hits()
 
-        # Skip if the current module has no hits (redundant safeguard)
+        #skip if no hits on a modules
         if not hits_current:
             continue
 
-        # Generate segments between hits in the current and next module
+        #segments between hits in the current and next module
         segments.extend(Segment(from_hit, to_hit) for from_hit, to_hit in itertools.product(hits_current, hits_next))
 
         print(f"Generated {len(segments)} segments.")
 
 
-    # Check the total number of segments
     N = len(segments)
     print(f"[Hamiltonian Generation] Number of segments generated: {N}")
 
-    # Generate vectors and norms for consistency checks
     vectors = np.array([seg.to_vect() for seg in segments])
     norms = np.linalg.norm(vectors, axis=1)
     eps = 1e-9
-
-    # Perform angular and bifurcation consistency checks
     results = Parallel(n_jobs=-1, backend="loky")(
         delayed(angular_and_bifurcation_checks)(i, vectors, norms, segments, N, alpha, eps)
         for i in range(N)
@@ -183,7 +155,6 @@ def generate_hamiltonian_real_data(event, params):
     A_ang = dok_matrix((N, N), dtype=np.float64)
     A_bif = dok_matrix((N, N), dtype=np.float64)
 
-    # Aggregate angular and bifurcation results
     for ang_results, bif_results in results:
         for i, j, value in ang_results:
             A_ang[i, j] = value
@@ -195,7 +166,6 @@ def generate_hamiltonian_real_data(event, params):
     A_ang = A_ang.tocsc()
     A_bif = A_bif.tocsc()
 
-    # Penalize overlapping segments
     A_inh = dok_matrix((N, N), dtype=np.float64)
     for i in range(N):
         seg_i = segments[i]
@@ -209,27 +179,39 @@ def generate_hamiltonian_real_data(event, params):
     # Combine Hamiltonian components
     A = lambda_val * (A_ang + A_bif + A_inh)
 
-    # Debugging: Print Hamiltonian statistics
+    #Hamiltonian statistics
     print(f"[Hamiltonian Generation] Hamiltonian matrix A: shape {A.shape}, non-zero elements: {A.count_nonzero()}")
     return A, np.zeros(N), segments
-
 
 def generate_hamiltonian(event, params):
     lambda_val = params.get('lambda', 1.0)
     alpha = params.get('alpha', 1.0)
     beta = params.get('beta', 1.0)
+    modules = sorted(event.modules, key=lambda m: m.z)
 
-    modules = event.modules.copy()
-    modules.sort(key=lambda a: a.z)
-
-    # Generate segments between hits in adjacent modules
+#generate segments skipping over modules without hits
     segments = []
     for idx in range(len(modules) - 1):
-        hits_from = modules[idx].hits()
-        hits_to = modules[idx + 1].hits()
-        for from_hit, to_hit in itertools.product(hits_from, hits_to):
-            segments.append(Segment(from_hit, to_hit))
+        current_module = modules[idx]
+        next_idx = idx + 1
+        while next_idx < len(modules) and not modules[next_idx].hits():
+            next_idx += 1
 
+        #no valid next module with hits, just break
+        if next_idx >= len(modules):
+            break
+
+        hits_current = current_module.hits()
+        hits_next = modules[next_idx].hits()
+
+        #skip if no hits on a modules
+        if not hits_current:
+            continue
+
+        #segments between hits in the current and next module
+        segments.extend(Segment(from_hit, to_hit) for from_hit, to_hit in itertools.product(hits_current, hits_next))
+
+        print(f"Generated {len(segments)} segments.")
 
     N = len(segments)
     A_ang = np.zeros((N, N))
@@ -272,12 +254,7 @@ def generate_hamiltonian(event, params):
     return A, b, segments
 
 def visualize_segments(segments):
-    """
-    Visualize the segments constructed during Hamiltonian generation.
 
-    Args:
-        segments (list of Segment): List of segments to visualize.
-    """
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
     ax.set_title("Constructed Segments")
@@ -352,7 +329,6 @@ def main():
     }
     validation_data = []
 
-    # Iterate all events
     for (dirpath, dirnames, filenames) in os.walk("events"):
         for i, filename in enumerate(filenames):
             if i != 2:
@@ -367,7 +343,7 @@ def main():
             print(f"[Main] Total number of hits in event: {total_hits}")
 
             print(f"[Main] Reconstructing event {i}...")
-            A, b, segments = generate_hamiltonian_real_data(event_instance, params)
+            A, b, segments = generate_hamiltonian(event_instance, params)
             visualize_segments(segments)
             #use for debugging the optimized ham
             #if A.count_nonzero() == 0:
