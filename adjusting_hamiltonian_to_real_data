@@ -1,11 +1,13 @@
 import numpy as np
 import itertools
 import scipy.sparse as sp
-from scipy.sparse import dok_matrix, csc_matrix
+from scipy.sparse import dok_matrix, csc_matrix, lil_matrix, csr_matrix
 from joblib import Parallel, delayed
 from dwave.system import LeapHybridSampler
 import dimod
 import os
+from copy import deepcopy
+
 os.environ['DWAVE_API_TOKEN'] = 'DEV-b59f413d6a1407427e9f0079dd8e3cfb8106e58d'
 def qubosolverHr(A, b):
     A = csc_matrix(A)
@@ -34,19 +36,217 @@ def qubosolverHr(A, b):
 
     return sol_sample
 
-# Define the Segment class according to the logic of the original Hamiltonian
 class Segment:
     def __init__(self, from_hit, to_hit):
+
+        if not from_hit or not to_hit:
+            raise ValueError("Both from_hit and to_hit must be valid Hit objects.")
         self.from_hit = from_hit
         self.to_hit = to_hit
 
     def to_vect(self):
-        """Returns the vector representation of the segment."""
+
         return np.array([
             self.to_hit.x - self.from_hit.x,
             self.to_hit.y - self.from_hit.y,
             self.to_hit.z - self.from_hit.z
         ])
+
+    def length(self):
+        vect = self.to_vect()
+        return np.linalg.norm(vect)
+
+    def normalized_vect(self):
+        vect = self.to_vect()
+        norm = np.linalg.norm(vect)
+        if norm == 0:
+            raise ValueError("Zero-length segment cannot be normalized.")
+        return vect / norm
+
+    def __repr__(self):
+        return (f"Segment(from_hit=Hit(x={self.from_hit.x}, y={self.from_hit.y}, z={self.from_hit.z}), "
+                f"to_hit=Hit(x={self.to_hit.x}, y={self.to_hit.y}, z={self.to_hit.z}))")
+
+    def __str__(self):
+        return f"Segment from ({self.from_hit.x}, {self.from_hit.y}, {self.from_hit.z}) to ({self.to_hit.x}, {self.to_hit.y}, {self.to_hit.z})"
+    
+def generate_hamiltonianC(event, params, verbose=True):
+    """
+    Generates the Hamiltonian matrix for the QUBO formulation based on the provided event and parameters.
+
+    Parameters:
+    - event: An object containing detector modules and hits.
+    - params: A dictionary containing the parameters 'alpha', 'beta', and 'epsilon'.
+    - verbose: Boolean flag to control the verbosity of the output.
+
+    Returns:
+    - A_total: The final Hamiltonian matrix (sparse CSR matrix).
+    - b: The linear term vector (zeros in this formulation).
+    - segments: The list of generated segments.
+    """
+    if verbose:
+        print("\n[generate_hamiltonian] Starting Hamiltonian generation...")
+    
+    # Retrieve parameters with default values
+    lambda_val = params.get('lambda', 1.0)
+    alpha = params.get('alpha', 1.0)
+    beta = params.get('beta', 1.0)
+    epsilon = 1e-2
+
+    modules = deepcopy(event.modules)
+    modules.sort(key=lambda module: module.z)
+    if verbose:
+        print(f"[generate_hamiltonian] Modules sorted by z-coordinate. Number of modules: {len(modules)}")
+
+    # Generate all possible segments between consecutive modules
+    segments = []
+    for idx in range(len(modules) - 1):
+        current_module = modules[idx]
+        next_module = modules[idx + 1]
+        hits_current = current_module.hits()
+        hits_next = next_module.hits()
+        for from_hit, to_hit in itertools.product(hits_current, hits_next):
+            try:
+                segment = Segment(from_hit, to_hit)
+                if segment.length() == 0:
+                    raise ValueError("Zero-length segment.")
+                segments.append(segment)
+            except ValueError as e:
+                if verbose:
+                    print(f"[generate_hamiltonian] Skipping invalid segment: {e}")
+
+    N = len(segments)
+    if verbose:
+        print(f"[generate_hamiltonian] Total number of segments generated: {N}")
+
+    if N == 0:
+        if verbose:
+            print("[generate_hamiltonian] No segments generated. Returning empty Hamiltonian.")
+        return csr_matrix((0, 0)), np.zeros(0), segments
+
+    # Initialize Hamiltonian components as sparse
+    A_ang = lil_matrix((N, N))
+    A_bif = lil_matrix((N, N))
+    A_inh = lil_matrix((N, N))
+
+    #module assignments for A_inh
+    from_modules = np.array([seg.from_hit.module_number for seg in segments])
+    to_modules = np.array([seg.to_hit.module_number for seg in segments])
+
+    for i in range(N):
+        for j in range(N):
+            if i != j:
+                shared = (to_modules[i] == from_modules[j]) or (from_modules[i] == to_modules[j])
+                if shared: 
+                    A_inh[i, j] = beta
+
+    # Populate A_ang and A_bif
+    for i, seg_i in enumerate(segments):
+        for j, seg_j in enumerate(segments):
+            if i == j:
+                continue
+
+            vect_i = seg_i.to_vect()
+            vect_j = seg_j.to_vect()
+            norm_i = np.linalg.norm(vect_i)
+            norm_j = np.linalg.norm(vect_j)
+
+            cosine = 0
+            if norm_i > 0 and norm_j > 0:
+                cosine = np.dot(vect_i, vect_j) / (norm_i * norm_j)
+
+            if np.isclose(cosine, 1, atol=epsilon): 
+                A_ang[i, j] = 1
+
+            if seg_i.from_hit.id == seg_j.from_hit.id and seg_i.to_hit.id != seg_j.to_hit.id:
+                A_bif[i, j] = -alpha
+
+            if seg_i.from_hit.id != seg_j.from_hit.id and seg_i.to_hit.id == seg_j.to_hit.id:
+                A_bif[i, j] = -alpha
+
+    A_ang = A_ang.tocsr()
+    A_bif = A_bif.tocsr()
+    A_inh = A_inh.tocsr()
+
+    A_total = -1*(A_ang + A_bif + A_inh)
+
+    if verbose:
+        print(f"[generate_hamiltonian] Hamiltonian matrix shape: {A_total.shape}")
+        print(f"[generate_hamiltonian] Non-zero elements: {A_total.nnz}")
+
+    b = np.zeros(N)
+
+    return A_total, b, segments
+
+def generate_hamiltonianORG(fake_event, params):
+
+    # Extract parameters
+    lambda_val = params.get('lambda')
+    alpha = params.get('alpha')
+    beta = params.get('beta')
+
+    # Access attributes of the event object
+    module_prefix_sum = fake_event.module_prefix_sum
+    x, y, z = fake_event.x, fake_event.y, fake_event.z
+
+    # Reconstruct modules and hits
+    modules = []
+    for i in range(len(module_prefix_sum) - 1):
+        start_idx = module_prefix_sum[i]
+        end_idx = module_prefix_sum[i + 1]
+        hits = [{"id": idx, "x": x[idx], "y": y[idx], "z": z[idx]} for idx in range(start_idx, end_idx)]
+        modules.append({"id": i, "hits": hits})
+
+    # Generate segments from consecutive module hits
+    segments = []
+    for idx in range(len(modules) - 1):
+        module_from = modules[idx]
+        module_to = modules[idx + 1]
+        for from_hit, to_hit in itertools.product(module_from["hits"], module_to["hits"]):
+            segments.append({"from_hit": from_hit, "to_hit": to_hit})
+
+    # Initialize Hamiltonian components
+    N = len(segments)
+    A = np.zeros((N, N))
+    A_ang = np.zeros((N, N))
+    A_bif = np.zeros((N, N))
+    A_inh = np.zeros((N, N))
+    b = np.zeros(N)
+
+    # Calculate cosine similarity and bifurcation/inhibition terms
+    def calculate_vector(hit1, hit2):
+        """Calculate vector from one hit to another."""
+        return np.array([hit2["x"] - hit1["x"], hit2["y"] - hit1["y"], hit2["z"] - hit1["z"]])
+
+    for i, seg_i in enumerate(segments):
+        for j, seg_j in enumerate(segments):
+            if i != j:
+                # Calculate cosine similarity
+                vect_i = calculate_vector(seg_i["from_hit"], seg_i["to_hit"])
+                vect_j = calculate_vector(seg_j["from_hit"], seg_j["to_hit"])
+                cosine = np.dot(vect_i, vect_j) / (np.linalg.norm(vect_i) * np.linalg.norm(vect_j))
+                
+                eps = 1e-9
+                if np.abs(cosine - 1) < eps:
+                    A_ang[i, j] = 1
+
+                # Bifurcation penalty
+                if seg_i["from_hit"]["id"] == seg_j["from_hit"]["id"] and seg_i["to_hit"]["id"] != seg_j["to_hit"]["id"]:
+                    A_bif[i, j] = -alpha
+
+                if seg_i["from_hit"]["id"] != seg_j["from_hit"]["id"] and seg_i["to_hit"]["id"] == seg_j["to_hit"]["id"]:
+                    A_bif[i, j] = -alpha
+
+                # Inhibition term
+                if seg_i["from_hit"]["id"] == seg_j["to_hit"]["id"]:
+                    A_inh[i, j] = beta
+
+    # Combine all components to compute the final Hamiltonian matrix
+    A = -1 * (A_ang + A_bif + A_inh)
+    components = {"A_ang": -A_ang, "A_bif": -A_bif, "A_inh": -A_inh}
+
+    return A, b, segments
+
 
 # Angular and bifurcation consistency checks
 def angular_and_bifurcation_checks(i, vectors, norms, segments, N, alpha, eps):
@@ -143,15 +343,14 @@ def generate_hamiltonian_real_data(event, params):
     A = -1 * (A_ang + A_bif + A_inh)
 
     return A, b, segments
+
+
 from event_model.event_model import event
  # Assuming this imports the event class
 import json
 import os
 
-# Load your real event data (assuming it's in JSON format)
-events_folder = 'events'
-filename = 'velo_event_2.json'
-file_path = os.path.join(events_folder, filename)
+file_path = r'C:\Users\Vita\Documents\GitHub\velopix.copy-1\try_data.json'
 
 # Load the JSON data
 with open(file_path, 'r') as f:
@@ -168,7 +367,7 @@ params = {
 }
 
 # Generate the Hamiltonian
-A, b, segments = generate_hamiltonian_real_data(eventt, params)
+A, b, segments = generate_hamiltonianORG(eventt, params)
 
 print(A.toarray())
 

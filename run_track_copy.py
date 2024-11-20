@@ -1,7 +1,7 @@
 import numpy as np
 import itertools
 import scipy.sparse as sp
-from scipy.sparse import dok_matrix, csc_matrix
+from scipy.sparse import dok_matrix, csc_matrix, lil_matrix
 from joblib import Parallel, delayed
 from dwave.system import LeapHybridSampler
 import dimod
@@ -299,6 +299,123 @@ def generate_hamiltonian(event, params):
     print(f"[generate_hamiltonian] Hamiltonian matrix A has {np.count_nonzero(A)} non-zero elements.")
 
     return A, b, segments
+import numpy as np
+from scipy.sparse import csr_matrix, lil_matrix
+from copy import deepcopy
+import itertools
+
+def generate_hamiltonianC(event, params, verbose=True):
+    """
+    Generates the Hamiltonian matrix for the QUBO formulation based on the provided event and parameters.
+
+    Parameters:
+    - event: An object containing detector modules and hits.
+    - params: A dictionary containing the parameters 'alpha', 'beta', and 'epsilon'.
+    - verbose: Boolean flag to control the verbosity of the output.
+
+    Returns:
+    - A_total: The final Hamiltonian matrix (sparse CSR matrix).
+    - b: The linear term vector (zeros in this formulation).
+    - segments: The list of generated segments.
+    """
+    if verbose:
+        print("\n[generate_hamiltonian] Starting Hamiltonian generation...")
+    
+    # Retrieve parameters with default values
+    lambda_val = params.get('lambda', 1.0)
+    alpha = params.get('alpha', 1.0)
+    beta = params.get('beta', 1.0)
+    epsilon = 1e-2
+
+    modules = deepcopy(event.modules)
+    modules.sort(key=lambda module: module.z)
+    if verbose:
+        print(f"[generate_hamiltonian] Modules sorted by z-coordinate. Number of modules: {len(modules)}")
+
+    # Generate all possible segments (doublets) between consecutive modules
+    segments = []
+    for idx in range(len(modules) - 1):
+        current_module = modules[idx]
+        next_module = modules[idx + 1]
+        hits_current = current_module.hits()
+        hits_next = next_module.hits()
+        for from_hit, to_hit in itertools.product(hits_current, hits_next):
+            try:
+                segment = Segment(from_hit, to_hit)
+                if segment.length() == 0:
+                    raise ValueError("Zero-length segment.")
+                segments.append(segment)
+            except ValueError as e:
+                if verbose:
+                    print(f"[generate_hamiltonian] Skipping invalid segment: {e}")
+
+    N = len(segments)
+    if verbose:
+        print(f"[generate_hamiltonian] Total number of segments generated: {N}")
+
+    if N == 0:
+        if verbose:
+            print("[generate_hamiltonian] No segments generated. Returning empty Hamiltonian.")
+        return csr_matrix((0, 0)), np.zeros(0), segments
+
+    # Initialize Hamiltonian components as sparse matrices
+    A_ang = lil_matrix((N, N))
+    A_bif = lil_matrix((N, N))
+    A_inh = lil_matrix((N, N))
+
+    # Prepare module assignments for A_inh
+    from_modules = np.array([seg.from_hit.module_number for seg in segments])
+    to_modules = np.array([seg.to_hit.module_number for seg in segments])
+
+    # Precompute shared layers/modules for A_inh
+    for i in range(N):
+        for j in range(N):
+            if i != j:
+                shared = (to_modules[i] == from_modules[j]) or (from_modules[i] == to_modules[j])
+                if shared:  # Explicitly check
+                    A_inh[i, j] = beta
+
+    # Populate A_ang and A_bif
+    for i, seg_i in enumerate(segments):
+        for j, seg_j in enumerate(segments):
+            if i == j:
+                continue
+
+            vect_i = seg_i.to_vect()
+            vect_j = seg_j.to_vect()
+            norm_i = np.linalg.norm(vect_i)
+            norm_j = np.linalg.norm(vect_j)
+
+            cosine = 0
+            if norm_i > 0 and norm_j > 0:
+                cosine = np.dot(vect_i, vect_j) / (norm_i * norm_j)
+
+            if np.isclose(cosine, 1, atol=epsilon):  # Fix ambiguity with explicit comparison
+                A_ang[i, j] = 1
+
+            if seg_i.from_hit.id == seg_j.from_hit.id and seg_i.to_hit.id != seg_j.to_hit.id:
+                A_bif[i, j] = alpha
+
+            if seg_i.from_hit.id != seg_j.from_hit.id and seg_i.to_hit.id == seg_j.to_hit.id:
+                A_bif[i, j] = alpha
+
+    # Convert Hamiltonian components to CSR format
+    A_ang = A_ang.tocsr()
+    A_bif = A_bif.tocsr()
+    A_inh = A_inh.tocsr()
+
+    # Compute the final Hamiltonian matrix
+    A_total = -A_ang + A_bif + A_inh
+
+    if verbose:
+        print(f"[generate_hamiltonian] Hamiltonian matrix shape: {A_total.shape}")
+        print(f"[generate_hamiltonian] Non-zero elements: {A_total.nnz}")
+
+    # Initialize the linear term vector as zeros
+    b = np.zeros(N)
+
+    return A_total, b, segments
+
 
 def visualize_segments(segments):
     print("[visualize_segments] Visualizing segments...")
@@ -363,8 +480,6 @@ def get_qubo_solution(sol_sample, event, segments):
         print(f"[get_qubo_solution] Completed track with hits: {track_hits}")
 
     print(f"[get_qubo_solution] Generated {len(tracks)} tracks.")
-    
-    # Convert hit IDs to track objects
     tracks_processed = []
     for idx, track_hit_ids in enumerate(tracks):
         try:
@@ -380,8 +495,8 @@ def main():
     print("[Main] Starting main function...")
     params = {
         'lambda': 1.0,
-        'alpha': 1.0,
-        'beta': 1.0
+        'alpha': 10.0,
+        'beta': 10.0
     }
 
     solutions = {
@@ -395,7 +510,7 @@ def main():
         for i, filename in enumerate(filenames):
             if i != 2:
                print(f"[Main] Skipping file {i}: {filename}")
-               continue  # Processes only the third file (0-based indexing)
+               continue  
             file_path = os.path.realpath(os.path.join(dirpath, filename))
             print(f"\n[Main] Loading event from file: {file_path}")
             with open(file_path, 'r') as f:
@@ -420,8 +535,15 @@ def main():
 
             print(f"[Main] Reconstructing event {i}...")
             try:
-                A, b, segments = generate_hamiltonian(event_instance, params)
-                print(f"[Main] Hamiltonian generated with shape {A.shape} and {np.count_nonzero(A)} non-zero elements.")
+                A, b, segments = generate_hamiltonianC(event_instance, params)
+                print(f"[Main Debug] A: type={type(A)}, shape={A.shape}, nnz={A.count_nonzero()}")
+                print(f"[Main Debug] b: type={type(b)}, shape={b.shape}")
+                print(f"[Main Debug] segments: length={len(segments)}")
+
+                if A is None or A.shape[0] == 0:
+                    print("[Main] Hamiltonian matrix A is empty. Skipping event.")
+                    continue
+
                 if len(segments) > 0:
                     print(f"[Main] Number of segments: {len(segments)}")
                     print("[Main] Sample segments:")
@@ -429,36 +551,24 @@ def main():
                         print(seg)
                 else:
                     print("[Main] No segments generated.")
-            except Exception as e:
-                print(f"[Main] Error generating Hamiltonian for {filename}: {e}")
-                continue
 
-            print("[Main] Visualizing segments...")
-            try:
+                print("[Main] Visualizing segments...")
                 visualize_segments(segments)
-            except Exception as e:
-                print(f"[Main] Error visualizing segments for {filename}: {e}")
 
-            # Use for debugging the optimized Hamiltonian
-            # if A.count_nonzero() == 0:
-                # print("[Main] Hamiltonian matrix A is empty. Skipping event.")
-                # continue
+                print("[Main] Solving QUBO...")
+                A_dense = A.toarray() if hasattr(A, "toarray") else A
+                b_flat = b.flatten() if b.ndim > 1 else b
+                sol_sample = qubosolverHr(A_dense, b_flat)
 
-            try:
-                sol_sample = qubosolverHr(A, b)
-                print("[Main] QUBO Solver completed.")
-            except Exception as e:
-                print(f"[Main] Error during QUBO solving for {filename}: {e}")
-                continue
-
-            try:
+                print("[Main] Processing QUBO solution...")
                 tracks = get_qubo_solution(sol_sample, event_instance, segments)
                 print(f"[Main] Number of tracks reconstructed: {len(tracks)}")
                 solutions["qubo_track_reconstruction"].append(tracks)
                 validation_data.append(json_data)
                 event_files_processed += 1
+
             except Exception as e:
-                print(f"[Main] Error processing QUBO solution for {filename}: {e}")
+                print(f"[Main] Error: {e}")
                 continue
 
     if event_files_processed == 0:
