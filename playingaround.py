@@ -296,8 +296,9 @@ def generate_hamiltonian(event, params):
     beta = params.get('beta')
 
     modules = deepcopy(event.modules)
-    modules.sort(key=lambda module: module.z)
-    print("[generate_hamiltonian] Modules deep-copied and sorted by z-coordinate.")
+    modules.sort(key=lambda module: module.module_number) #sorted by modules id instead of z coordinate
+
+    print("[generate_hamiltonian] Modules deep-copied and sorted by module numbere")
     print(f"[generate_hamiltonian] Number of modules after sorting: {len(modules)}")
 
     #generate segments skipping over modules without hits
@@ -335,27 +336,16 @@ def generate_hamiltonian(event, params):
     A_ang = np.zeros((N, N))
     A_bif = np.zeros((N, N))
     A_inh = np.zeros((N, N))
-    ######this condtition is likely messing something up###
     b = np.zeros(N)
-    s_ab = np.zeros((N, N), dtype=int)
-    print("[generate_hamiltonian] Initializing s_ab matrix based on module numbers.")
-    for i, seg_i in enumerate(segments):
-        for j, seg_j in enumerate(segments):
-            try:
-                s_ab[i, j] = int(seg_i.from_hit.module_number == 1 and seg_j.to_hit.module_number == 1)
-            except AttributeError as e:
-                print(f"[generate_hamiltonian] AttributeError for segments {i}, {j}: {e}")
-                print(f"Segment {i}: {seg_i}")
-                print(f"Segment {j}: {seg_j}")
 
-    #debugg
-    print("[generate_hamiltonian] Sample s_ab matrix entries:")
-    for i in range(min(N, 3)):
-        for j in range(min(N, 3)):
-            print(f"s_ab[{i}, {j}] = {s_ab[i, j]}")
+    #is this correctly implemented?
+    #for i, seg in enumerate(segments):
+        #if seg.from_hit.module_number == seg.to_hit.module_number:
+           # A_inh[i, i] = beta
+           # print(f"[Inh interaction] A_inh[{i}, {i}] = {A_inh[i, i]} (penalized for same module).")
 
-    #apply conditions
-    print("[generate_hamiltonian] Populating A_ang, A_bif, and A_inh matrices.")
+
+    print("[generate_hamiltonian] Populating A_ang, A_bif")
     for i, seg_i in enumerate(segments):
         for j, seg_j in enumerate(segments):
             if i != j:
@@ -371,24 +361,21 @@ def generate_hamiltonian(event, params):
                 else:
                     cosine = np.dot(vect_i, vect_j) / (norm_i * norm_j)
 
-                eps = 1e-2
+                eps = 1e-6
 
                 # Populate A_ang if vectors are parallel
                 if np.abs(cosine - 1) < eps:
-                    A_ang[i, j] = -1
-                    print(f"[generate_hamiltonian] A_ang[{i}, {j}] set to 1 (angular consistency).")
+                    A_ang[i, j] = -50
+                    print(f"[generate_hamiltonian] A_ang[{i}, {j}] set to something negative (angular consistency).")
 
                 # Populate A_bif for bifurcations
                 if (seg_i.from_hit == seg_j.from_hit) and (seg_i.to_hit != seg_j.to_hit):
                     A_bif[i, j] = alpha
-                    print(f"[generate_hamiltonian] A_bif[{i}, {j}] set to -{alpha} (bifurcation: same from_hit).")
+                    print(f"[generate_hamiltonian] A_bif[{i}, {j}] set to {alpha} (bifurcation: same from_hit).")
                 if (seg_i.from_hit != seg_j.from_hit) and (seg_i.to_hit == seg_j.to_hit):
                     A_bif[i, j] = alpha
-                    print(f"[generate_hamiltonian] A_bif[{i}, {j}] set to -{alpha} (bifurcation: same to_hit).")
-
-                #Segment i originates from the same module segment j terminates
-                if seg_i.from_hit.module_number == seg_j.to_hit.module_number:
-                    A_inh[i, j] = beta
+                    print(f"[generate_hamiltonian] A_bif[{i}, {j}] set to {alpha} (bifurcation: same to_hit).")
+        
 
 
     # Compute the final Hamiltonian matrix
@@ -485,7 +472,7 @@ def get_qubo_solutionEEE(sol_sample, event, segments):
     return tracks_processed
 
 
-def visualize_tracks(reconstructed_tracks, ground_truth_particles, event, residuals):
+def visualize_tracks(reconstructed_tracks, ground_truth_particles):
 
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
@@ -507,13 +494,6 @@ def visualize_tracks(reconstructed_tracks, ground_truth_particles, event, residu
         y = [hit.y for hit in particle.velohits]
         z = [hit.z for hit in particle.velohits]
         ax.plot(x, y, z, linestyle="-", color="blue", label="True Track" if particle == ground_truth_particles[0] else "")
-
-    for rec_track, true_particle, residual in residuals:
-        if true_particle is None or residual > 0:
-            x = [hit.x for hit in rec_track.hits]
-            y = [hit.y for hit in rec_track.hits]
-            z = [hit.z for hit in rec_track.hits]
-            ax.scatter(x, y, z, color="green", label="Mismatch Residual" if rec_track == residuals[0][0] else "")
 
     ax.legend()
     plt.show()
@@ -688,7 +668,7 @@ def main():
     params = {
         'lambda': 1.0, #multiply at the end +
         'alpha': 50.0, #a_bif penelizes bifunctions -
-        'beta': 10.0, #same module penalty A_inh -
+        'beta': 100.0, #same module penalty A_inh -
         'track_length_penalty' : 30,
         'two_hit_penalty' : 10,
         'hit_overlap_penalty': 10 
@@ -722,7 +702,7 @@ def main():
 
         
             sol_sample = qubosolverHr(A, b)
-            reconstructed_tracks = get_qubo_solutionEEE(sol_sample, event_instance, segments)
+            reconstructed_tracks = get_qubo_solution(sol_sample, event_instance, segments)
             print(f"[Main] Number of tracks reconstructed: {len(reconstructed_tracks)}")
 
             solutions["qubo_track_reconstruction"].append(reconstructed_tracks)
@@ -732,17 +712,7 @@ def main():
             weights = vl.comp_weights(reconstructed_tracks, validator_event_instance)
             t2p, p2t = vl.hit_purity(reconstructed_tracks, validator_event_instance.particles, weights)
 
-
-            residuals = calculate_residuals(reconstructed_tracks, validator_event_instance.particles)
-
-
-            print("\n[Residual Analysis]")
-            for rec_track, true_particle, residual in residuals:
-                print(f"Reconstructed Track: {rec_track}")
-                print(f"Associated Particle: {true_particle}")
-                print(f"Residual: {residual}")
-
-            visualize_tracks(reconstructed_tracks, validator_event_instance.particles, event_instance, residuals)
+            visualize_tracks(reconstructed_tracks, validator_event_instance.particles)
 
             #ghost_rate_value = vl.validate_ghost_fraction([json_data], [reconstructed_tracks])
             #clone_fraction = vl.validate_clone_fraction([json_data], [reconstructed_tracks])
