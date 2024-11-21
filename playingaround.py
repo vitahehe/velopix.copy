@@ -38,9 +38,6 @@ def visualize_segments(segments):
 
 
 def plot_qubo_sparsity(A_total, title="QUBO Matrix Sparsity"):
-    """
-    Plots the sparsity pattern of the QUBO matrix.
-    """
     plt.figure(figsize=(10, 10))
     plt.spy(A_total, markersize=1)
     plt.title(title)
@@ -57,7 +54,7 @@ def find_segments(s0, active):
         direction_s1 = s1.normalized_vect()
         cosine_similarity = np.dot(direction_s0, direction_s1)
         if s0.from_hit.id == s1.to_hit.id or s1.from_hit.id == s0.to_hit.id:
-            if cosine_similarity > 0.98:  # Only connect if nearly aligned
+            if cosine_similarity > 1e-2:  #added condition: only connect if nearly aligned
                 found_s.append(s1)
     return found_s
 
@@ -65,48 +62,35 @@ def get_qubo_solution(sol_sample, event, segments):
     print(f"sol_sample: {sol_sample}")
     print(f"Number of segments: {len(segments)}")
     
-    # Filter segments based on the solution from QUBO
+    #based on quboi 
     active_segments = [
         segment for segment, pseudo_state in zip(segments, sol_sample) if pseudo_state > 0
     ]
     print(f"Active segments count: {len(active_segments)}")
-    
-    # Initialize the active list and tracks
     active = deepcopy(active_segments)
     tracks = []
-    used_hits = set()  # Keep track of used hit IDs to avoid overlaps
+    used_hits = set() #kepp track of hit ids
 
     while len(active):
         s = active.pop()
-
-        # Skip if any of the hits in this segment have already been used
-        if s.from_hit.id in used_hits or s.to_hit.id in used_hits:
-            continue
-
-        # Start a new track
         track_hits = {s.from_hit.id, s.to_hit.id}
         used_hits.update(track_hits)
 
-        # Find connected segments
+        #connected segments
         next_segments = find_segments(s, active)
         while len(next_segments):
             s = next_segments.pop()
-
-            # Skip segments that have already been used
-            if s.from_hit.id in used_hits or s.to_hit.id in used_hits:
-                continue
-
             try:
                 active.remove(s)
             except ValueError:
                 pass
 
-            # Update the track with the new segment
+            #update the new segment
             track_hits.update([s.from_hit.id, s.to_hit.id])
             used_hits.update([s.from_hit.id, s.to_hit.id])
             next_segments += find_segments(s, active)
 
-        # Add the completed track to the list of tracks
+        #list of tracks
         tracks.append(track_hits)
 
     print(f"Generated {len(tracks)} tracks.")
@@ -190,9 +174,11 @@ from scipy.sparse import dok_matrix, csc_matrix
 from joblib import Parallel, delayed
 import itertools
 
-def angular_and_bifurcation_checks(i, vectors, norms, segments, N, alpha, eps):
+def angular_and_bifurcation_checks(i, vectors, norms, segments, N, params):
     results_ang = []
     results_bif = []
+    alpha = params.get('alpha')
+    eps = 1e-2
 
     # Normalize all the vectors and take care of 0devision case
     vect_i = vectors[i]
@@ -210,7 +196,7 @@ def angular_and_bifurcation_checks(i, vectors, norms, segments, N, alpha, eps):
 
         cosine = np.dot(vect_i_normalized, vect_j_normalized)
         if np.abs(cosine - 1) < eps:
-            results_ang.append((i, j, -1))  # Add angular consistency interaction
+            results_ang.append((i, j,-1))  # Add angular consistency interaction
 
         # Bifurcation consistency
         seg_i, seg_j = segments[i], segments[j]
@@ -223,9 +209,9 @@ def angular_and_bifurcation_checks(i, vectors, norms, segments, N, alpha, eps):
 
 
 def generate_hamiltonian_real_data(event, params):
-    lambda_val = params.get('lambda', 1.0)
-    alpha = params.get('alpha', 1.0)
-    beta = params.get('beta', 1.0)
+    lambda_val = params.get('lambda')
+    alpha = params.get('alpha')
+    beta = params.get('beta')
 
 #Sort modules by their z-coordinate
     modules = sorted(event.modules, key=lambda m: m.z)
@@ -260,9 +246,9 @@ def generate_hamiltonian_real_data(event, params):
 
     vectors = np.array([seg.to_vect() for seg in segments])
     norms = np.linalg.norm(vectors, axis=1)
-    eps = 1e-9
+    eps = 1e-2
     results = Parallel(n_jobs=-1, backend="loky")(
-        delayed(angular_and_bifurcation_checks)(i, vectors, norms, segments, N, alpha, eps)
+        delayed(angular_and_bifurcation_checks)(i, vectors, norms, segments, N, params)
         for i in range(N)
     )
 
@@ -283,127 +269,140 @@ def generate_hamiltonian_real_data(event, params):
     A_inh = dok_matrix((N, N), dtype=np.float64)
     for i in range(N):
         seg_i = segments[i]
-        for j in range(i + 1, N):
+        for j in range(N):  # Includes i == j for consistency with matrix dimension
             seg_j = segments[j]
-            if seg_i.from_hit == seg_j.from_hit or seg_i.to_hit == seg_j.to_hit:
-                A_inh[i, j] = beta
-                A_inh[j, i] = beta
+            try:
+                #Segment i originates from the same module segment j terminates
+                if seg_i.from_hit == seg_j.from_hit or seg_i.to_hit == seg_j.to_hit:
+                    A_inh[i, j] = beta
+            except AttributeError as e:
+                print(f"[generate_hamiltonian_real_data] AttributeError for segments {i}, {j}: {e}")
+                print(f"Segment {i}: {seg_i}")
+                print(f"Segment {j}: {seg_j}")
+
     A_inh = A_inh.tocsc()
 
-    # Combine Hamiltonian components
     A = lambda_val * (A_ang + A_bif + A_inh)
 
     #Hamiltonian statistics
     print(f"[Hamiltonian Generation] Hamiltonian matrix A: shape {A.shape}, non-zero elements: {A.count_nonzero()}")
+
     return A, np.zeros(N), segments
 
-def generate_hamiltonianC(event, params, verbose=True):
-    """
-    Generates the Hamiltonian matrix for the QUBO formulation based on the provided event and parameters.
-
-    Parameters:
-    - event: An object containing detector modules and hits.
-    - params: A dictionary containing the parameters 'alpha', 'beta', and 'epsilon'.
-    - verbose: Boolean flag to control the verbosity of the output.
-
-    Returns:
-    - A_total: The final Hamiltonian matrix (sparse CSR matrix).
-    - b: The linear term vector (zeros in this formulation).
-    - segments: The list of generated segments.
-    """
-    if verbose:
-        print("\n[generate_hamiltonian] Starting Hamiltonian generation...")
-    
-    # Retrieve parameters with default values
-    lambda_val = params.get('lambda', 1.0)
-    alpha = params.get('alpha', 1.0)
-    beta = params.get('beta', 1.0)
-    epsilon = 1e-2
+def generate_hamiltonian(event, params):
+    print("\n[generate_hamiltonian] Starting Hamiltonian generation...")
+    lambda_val = params.get('lambda')
+    alpha = params.get('alpha')
+    beta = params.get('beta')
 
     modules = deepcopy(event.modules)
     modules.sort(key=lambda module: module.z)
-    if verbose:
-        print(f"[generate_hamiltonian] Modules sorted by z-coordinate. Number of modules: {len(modules)}")
+    print("[generate_hamiltonian] Modules deep-copied and sorted by z-coordinate.")
+    print(f"[generate_hamiltonian] Number of modules after sorting: {len(modules)}")
 
-    # Generate all possible segments between consecutive modules
+    #generate segments skipping over modules without hits
     segments = []
     for idx in range(len(modules) - 1):
         current_module = modules[idx]
-        next_module = modules[idx + 1]
+        next_idx = idx + 1
+        while next_idx < len(modules) and not modules[next_idx].hits():
+            next_idx += 1
+
+        #no valid next module with hits, just break
+        if next_idx >= len(modules):
+            break
+
         hits_current = current_module.hits()
-        hits_next = next_module.hits()
-        for from_hit, to_hit in itertools.product(hits_current, hits_next):
-            try:
-                segment = Segment(from_hit, to_hit)
-                if segment.length() == 0:
-                    raise ValueError("Zero-length segment.")
-                segments.append(segment)
-            except ValueError as e:
-                if verbose:
-                    print(f"[generate_hamiltonian] Skipping invalid segment: {e}")
+        hits_next = modules[next_idx].hits()
+
+        #skip if no hits on a modules
+        if not hits_current:
+            continue
+
+        #segments between hits in the current and next module
+        segments.extend(Segment(from_hit, to_hit) for from_hit, to_hit in itertools.product(hits_current, hits_next))
+
+        print(f"Generated {len(segments)} segments.") #
 
     N = len(segments)
-    if verbose:
-        print(f"[generate_hamiltonian] Total number of segments generated: {N}")
+    print(f"[generate_hamiltonian] Total number of segments generated: {N}")
 
     if N == 0:
-        if verbose:
-            print("[generate_hamiltonian] No segments generated. Returning empty Hamiltonian.")
-        return csr_matrix((0, 0)), np.zeros(0), segments
+        print("[generate_hamiltonian] No segments generated. Returning empty Hamiltonian.")
+        return np.zeros((0,0)), np.zeros(0), segments
 
-    # Initialize Hamiltonian components as sparse
-    A_ang = lil_matrix((N, N))
-    A_bif = lil_matrix((N, N))
-    A_inh = lil_matrix((N, N))
 
-    #module assignments for A_inh
-    from_modules = np.array([seg.from_hit.module_number for seg in segments])
-    to_modules = np.array([seg.to_hit.module_number for seg in segments])
-
-    for i in range(N):
-        for j in range(N):
-            if i != j:
-                shared = (to_modules[i] == from_modules[j]) or (from_modules[i] == to_modules[j])
-                if shared: 
-                    A_inh[i, j] = beta
-
-    # Populate A_ang and A_bif
+    A_ang = np.zeros((N, N))
+    A_bif = np.zeros((N, N))
+    A_inh = np.zeros((N, N))
+    ######this condtition is likely messing something up###
+    b = np.zeros(N)
+    s_ab = np.zeros((N, N), dtype=int)
+    print("[generate_hamiltonian] Initializing s_ab matrix based on module numbers.")
     for i, seg_i in enumerate(segments):
         for j, seg_j in enumerate(segments):
-            if i == j:
-                continue
+            try:
+                s_ab[i, j] = int(seg_i.from_hit.module_number == 1 and seg_j.to_hit.module_number == 1)
+            except AttributeError as e:
+                print(f"[generate_hamiltonian] AttributeError for segments {i}, {j}: {e}")
+                print(f"Segment {i}: {seg_i}")
+                print(f"Segment {j}: {seg_j}")
 
-            vect_i = seg_i.to_vect()
-            vect_j = seg_j.to_vect()
-            norm_i = np.linalg.norm(vect_i)
-            norm_j = np.linalg.norm(vect_j)
+    #debugg
+    print("[generate_hamiltonian] Sample s_ab matrix entries:")
+    for i in range(min(N, 3)):
+        for j in range(min(N, 3)):
+            print(f"s_ab[{i}, {j}] = {s_ab[i, j]}")
 
-            cosine = 0
-            if norm_i > 0 and norm_j > 0:
-                cosine = np.dot(vect_i, vect_j) / (norm_i * norm_j)
+    #apply conditions
+    print("[generate_hamiltonian] Populating A_ang, A_bif, and A_inh matrices.")
+    for i, seg_i in enumerate(segments):
+        for j, seg_j in enumerate(segments):
+            if i != j:
+                vect_i = seg_i.to_vect()
+                vect_j = seg_j.to_vect()
+                norm_i = np.linalg.norm(vect_i)
+                norm_j = np.linalg.norm(vect_j)
+                
+                # Avoid division by zero
+                if norm_i == 0 or norm_j == 0:
+                    cosine = 0
+                    print(f"[generate_hamiltonian] Warning: Zero-length vector detected for segments {i} or {j}.")
+                else:
+                    cosine = np.dot(vect_i, vect_j) / (norm_i * norm_j)
 
-            if np.isclose(cosine, 1, atol=epsilon): 
-                A_ang[i, j] = 1
+                eps = 1e-2
 
-            if seg_i.from_hit.id == seg_j.from_hit.id and seg_i.to_hit.id != seg_j.to_hit.id:
-                A_bif[i, j] = -alpha
+                # Populate A_ang if vectors are parallel
+                if np.abs(cosine - 1) < eps:
+                    A_ang[i, j] = -1
+                    print(f"[generate_hamiltonian] A_ang[{i}, {j}] set to 1 (angular consistency).")
 
-            if seg_i.from_hit.id != seg_j.from_hit.id and seg_i.to_hit.id == seg_j.to_hit.id:
-                A_bif[i, j] = -alpha
+                # Populate A_bif for bifurcations
+                if (seg_i.from_hit == seg_j.from_hit) and (seg_i.to_hit != seg_j.to_hit):
+                    A_bif[i, j] = alpha
+                    print(f"[generate_hamiltonian] A_bif[{i}, {j}] set to -{alpha} (bifurcation: same from_hit).")
+                if (seg_i.from_hit != seg_j.from_hit) and (seg_i.to_hit == seg_j.to_hit):
+                    A_bif[i, j] = alpha
+                    print(f"[generate_hamiltonian] A_bif[{i}, {j}] set to -{alpha} (bifurcation: same to_hit).")
 
-    A_ang = A_ang.tocsr()
-    A_bif = A_bif.tocsr()
-    A_inh = A_inh.tocsr()
+                #Segment i originates from the same module segment j terminates
+                if seg_i.from_hit.module_number == seg_j.to_hit.module_number:
+                    A_inh[i, j] = beta
 
-    A_total = A_ang + A_bif + A_inh
 
-    if verbose:
-        print(f"[generate_hamiltonian] Hamiltonian matrix shape: {A_total.shape}")
-        print(f"[generate_hamiltonian] Non-zero elements: {A_total.nnz}")
+    # Compute the final Hamiltonian matrix
+    A = lambda_val * (A_ang + A_bif + A_inh)
+    print("[generate_hamiltonian] Combined A_ang, A_bif, and A_inh into final Hamiltonian matrix A.")
 
-    b = np.zeros(N)
 
-    return A_total, b, segments
+    # Print Hamiltonian matrix statistics
+    print(f"[generate_hamiltonian] Hamiltonian matrix A shape: {A.shape}")
+    print(f"[generate_hamiltonian] Hamiltonian matrix A has {np.count_nonzero(A)} non-zero elements.")
+
+    return A, b, segments
+
+
 
 #function just to see whats up with the solutions
 def calculate_residuals(reconstructed_tracks, ground_truth_particles):
@@ -452,7 +451,7 @@ def get_qubo_solutionEEE(sol_sample, event, segments):
             extending = False
             next_segments = []
             for seg in active:
-                # Check if this segment can be connected to the current track
+                #check if this segment can be connected to the current track
                 if seg.from_hit.id in track_hits:
                     next_hits = seg.to_hit.id
                     track_hits.add(next_hits)
@@ -553,100 +552,14 @@ def analyze_qubo_coefficients(A_total, top_n=10):
     for coeff, vars in zip(top_negative, top_negative_vars):
         print(f"Variables {vars}: {coeff}")
 
-import itertools
-from copy import deepcopy
-import numpy as np
-from scipy.sparse import lil_matrix, csr_matrix, csc_matrix
-import dimod
-from dimod import BinaryQuadraticModel
-from dwave.system import LeapHybridSampler
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.preprocessing import StandardScaler
-
-# Assuming the Segment class and load_event function are defined elsewhere
-
-def build_tracksTRYOUT(sol_sample, segments, min_segments=3, threshold=0.98):
-    """
-    Builds tracks from selected segments ensuring a minimum number of segments per track.
-    """
-    selected_segments = [seg for seg, active in zip(segments, sol_sample) if active]
-    tracks = []
-    used_segments = set()
-
-    for seg in selected_segments:
-        if seg in used_segments:
-            continue
-
-        current_track = [seg]
-        used_segments.add(seg)
-
-        # Extend the track forward
-        next_segments = find_segmentsTRYOUT(seg, selected_segments, threshold=threshold)
-        while next_segments:
-            next_seg = next_segments[0]  # Choose the first compatible segment
-            if next_seg in used_segments:
-                break
-            current_track.append(next_seg)
-            used_segments.add(next_seg)
-            seg = next_seg
-            next_segments = find_segmentsTRYOUT(seg, selected_segments, threshold=threshold)
-
-        # Extend the track backward
-        prev_segments = find_segments_backwardsTRYOUT(current_track[0], selected_segments, threshold=threshold)
-        while prev_segments:
-            prev_seg = prev_segments[0]
-            if prev_seg in used_segments:
-                break
-            current_track.insert(0, prev_seg)
-            used_segments.add(prev_seg)
-            current_track[0] = prev_seg
-            prev_segments = find_segments_backwardsTRYOUT(current_track[0], selected_segments, threshold=threshold)
-
-        if len(current_track) >= min_segments:
-            tracks.append(current_track)
-
-    return tracks
-def find_segmentsTRYOUT(s0, active, threshold=0.98):
-    """
-    Finds segments that can be connected forward to the current segment based on cosine similarity.
-    """
-    found_s = []
-    direction_s0 = s0.normalized_vect()
-    for s1 in active:
-        direction_s1 = s1.normalized_vect()
-        cosine_similarity = np.dot(direction_s0, direction_s1)
-        # Ensure that s1 starts where s0 ends and is highly aligned
-        if (s0.to_hit.id == s1.from_hit.id) and (cosine_similarity > threshold):
-            found_s.append(s1)
-    return found_s
-
-def find_segments_backwardsTRYOUT(s0, active, threshold=0.98):
-    """
-    Finds segments that can be connected backward to the current segment based on cosine similarity.
-    """
-    found_s = []
-    direction_s0 = s0.normalized_vect()
-    for s1 in active:
-        direction_s1 = s1.normalized_vect()
-        cosine_similarity = np.dot(direction_s0, direction_s1)
-        # Ensure that s1 ends where s0 starts and is highly aligned
-        if (s0.from_hit.id == s1.to_hit.id) and (cosine_similarity > threshold):
-            found_s.append(s1)
-    return found_s
 
 def generate_hamiltonianCCC(event, params, verbose=True):
-    """
-    Generates the Hamiltonian matrix for the QUBO formulation based on the provided event and parameters.
-    Integrates penalties to discourage ghost tracks and encourage longer, coherent tracks.
-    """
     if verbose:
         print("\n[generate_hamiltonian] Starting Hamiltonian generation...")
     
-    # Retrieve parameters with default values
     lambda_val = params.get('lambda', 1.0)
-    alpha = params.get('alpha', 20.0)  # Increased from 10.0
-    beta = params.get('beta', 20.0)    # Increased from 10.0
+    alpha = params.get('alpha', 20.0)  
+    beta = params.get('beta', 20.0)    
     track_length_penalty = params.get('track_length_penalty', 5.0)
     two_hit_penalty = params.get('two_hit_penalty', 10.0)
     hit_overlap_penalty = params.get('hit_overlap_penalty', 15.0)
@@ -657,22 +570,29 @@ def generate_hamiltonianCCC(event, params, verbose=True):
     if verbose:
         print(f"[generate_hamiltonian] Modules sorted by z-coordinate. Number of modules: {len(modules)}")
     
-    # Generate all possible segments between consecutive modules
+#generate segments skipping over modules without hits
     segments = []
     for idx in range(len(modules) - 1):
         current_module = modules[idx]
-        next_module = modules[idx + 1]
+        next_idx = idx + 1
+        while next_idx < len(modules) and not modules[next_idx].hits():
+            next_idx += 1
+
+        #no valid next module with hits, just break
+        if next_idx >= len(modules):
+            break
+
         hits_current = current_module.hits()
-        hits_next = next_module.hits()
-        for from_hit, to_hit in itertools.product(hits_current, hits_next):
-            try:
-                segment = Segment(from_hit, to_hit)
-                if segment.length() == 0:
-                    raise ValueError("Zero-length segment.")
-                segments.append(segment)
-            except ValueError as e:
-                if verbose:
-                    print(f"[generate_hamiltonian] Skipping invalid segment: {e}")
+        hits_next = modules[next_idx].hits()
+
+        #skip if no hits on a modules
+        if not hits_current:
+            continue
+
+        #segments between hits in the current and next module
+        segments.extend(Segment(from_hit, to_hit) for from_hit, to_hit in itertools.product(hits_current, hits_next))
+
+        print(f"Generated {len(segments)} segments.")
     
     N = len(segments)
     if verbose:
@@ -688,7 +608,7 @@ def generate_hamiltonianCCC(event, params, verbose=True):
     A_bif = lil_matrix((N, N))
     A_inh = lil_matrix((N, N))
     
-    # Module assignments for A_inh (inhibit overlapping segments)
+    #module assignments for A_inh (inhibit overlapping segments)
     from_modules = np.array([seg.from_hit.module_number for seg in segments])
     to_modules = np.array([seg.to_hit.module_number for seg in segments])
     
@@ -715,25 +635,23 @@ def generate_hamiltonianCCC(event, params, verbose=True):
                 cosine = np.dot(vect_i, vect_j) / (norm_i * norm_j)
 
             if np.isclose(cosine, 1, atol=epsilon): 
-                A_ang[i, j] = 1
+                A_ang[i, j] = -1
 
             if (seg_i.from_hit.id == seg_j.from_hit.id and seg_i.to_hit.id != seg_j.to_hit.id) or \
                (seg_i.from_hit.id != seg_j.from_hit.id and seg_i.to_hit.id == seg_j.to_hit.id):
-                A_bif[i, j] = -alpha
+                A_bif[i, j] = alpha
     
     # Convert to CSR format for efficient arithmetic operations
     A_ang = A_ang.tocsr()
     A_bif = A_bif.tocsr()
     A_inh = A_inh.tocsr()
-    
-    # Build the total Hamiltonian
     A_total = A_ang + A_bif + A_inh
     
-    # Add Track Length Penalty: Encourage longer tracks
+    #encourage longer tracks
     for i in range(N):
         A_total[i, i] += track_length_penalty
     
-    # Identify and Penalize Two-Hit Tracks
+    #penalize Two-Hit Tracks
     two_hit_pairs = []
     for i, seg_i in enumerate(segments):
         for j, seg_j in enumerate(segments):
@@ -743,7 +661,7 @@ def generate_hamiltonianCCC(event, params, verbose=True):
     for i, j in two_hit_pairs:
         A_total[i, j] += two_hit_penalty
     
-    # Add Hit Overlap Penalty: Prevent multiple segments from sharing the same hit
+    #prevent multiple segments from sharing the same hit
     hit_segment_map = {}
     for idx, seg in enumerate(segments):
         hit_segment_map.setdefault(seg.from_hit.id, []).append(idx)
@@ -768,9 +686,12 @@ def generate_hamiltonianCCC(event, params, verbose=True):
 #combines everything, compares and plots correct and found solutions
 def main():
     params = {
-        'lambda': 5.0,
-        'alpha': 50.0,
-        'beta': 20.0
+        'lambda': 1.0, #multiply at the end +
+        'alpha': 50.0, #a_bif penelizes bifunctions -
+        'beta': 10.0, #same module penalty A_inh -
+        'track_length_penalty' : 30,
+        'two_hit_penalty' : 10,
+        'hit_overlap_penalty': 10 
     }
 
     solutions = {
@@ -794,14 +715,14 @@ def main():
             print(f"[Main] Total number of hits in event: {total_hits}")
 
             print(f"[Main] Reconstructing event {i}...")
-            A, b, segments = generate_hamiltonianCCC(event_instance, params)
+            A, b, segments = generate_hamiltonian(event_instance, params)
             visualize_segments(segments)
             plot_qubo_sparsity(A, title="QUBO Matrix Sparsity after Adjustments")
-            plot_qubo_histogram(A, title="QUBO Coefficient Distribution after Adjustments")
+            #plot_qubo_histogram(A, title="QUBO Coefficient Distribution after Adjustments")
 
         
             sol_sample = qubosolverHr(A, b)
-            reconstructed_tracks = build_tracksTRYOUT(sol_sample, segments)
+            reconstructed_tracks = get_qubo_solutionEEE(sol_sample, event_instance, segments)
             print(f"[Main] Number of tracks reconstructed: {len(reconstructed_tracks)}")
 
             solutions["qubo_track_reconstruction"].append(reconstructed_tracks)
