@@ -14,6 +14,7 @@ import json
 from collections import defaultdict
 import hashlib
 from event_model.event_model import event, track
+from q_event_model import vp2q_event
 import validator.validator_lite as vl
 from copy import deepcopy
 
@@ -498,6 +499,43 @@ def visualize_tracks(reconstructed_tracks, ground_truth_particles):
     ax.legend()
     plt.show()
 
+def visualize_reconstructed_tracks(reconstructed_tracks):
+
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_title("Particle Track Reconstruction")
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+
+    #reconstructed track coppied
+    for track in reconstructed_tracks:
+        x = [hit.x for hit in track.hits]
+        y = [hit.y for hit in track.hits]
+        z = [hit.z for hit in track.hits]
+        ax.plot(x, y, z, linestyle="--", color="red", label="Reconstructed Track" if track == reconstructed_tracks[0] else "")
+    ax.legend()
+    plt.show()
+
+def visualize_truth(ground_truth_particles):
+
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_title("Particle Track Reconstruction")
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+
+    #true particle tracks plotting
+    for particle in ground_truth_particles:
+        x = [hit.x for hit in particle.velohits]
+        y = [hit.y for hit in particle.velohits]
+        z = [hit.z for hit in particle.velohits]
+        ax.plot(x, y, z, linestyle="-", color="blue", label="True Track" if particle == ground_truth_particles[0] else "")
+
+    ax.legend()
+    plt.show()
+
 #optimizing weights
 def plot_qubo_histogram(A_total, title="QUBO Coefficient Distribution"):
 
@@ -694,15 +732,17 @@ def main():
             total_hits = sum(len(list(m)) for m in event_instance.modules)
             print(f"[Main] Total number of hits in event: {total_hits}")
 
+            q_event_instance = vp2q_event(event_instance)
+            
             print(f"[Main] Reconstructing event {i}...")
-            A, b, segments = generate_hamiltonian(event_instance, params)
+            A, b, segments = generate_hamiltonian(q_event_instance, params)
             visualize_segments(segments)
             plot_qubo_sparsity(A, title="QUBO Matrix Sparsity after Adjustments")
             #plot_qubo_histogram(A, title="QUBO Coefficient Distribution after Adjustments")
 
         
             sol_sample = qubosolverHr(A, b)
-            reconstructed_tracks = get_qubo_solution(sol_sample, event_instance, segments)
+            reconstructed_tracks = get_qubo_solution(sol_sample, q_event_instance, segments)
             print(f"[Main] Number of tracks reconstructed: {len(reconstructed_tracks)}")
 
             solutions["qubo_track_reconstruction"].append(reconstructed_tracks)
@@ -711,7 +751,8 @@ def main():
             validator_event_instance = vl.parse_json_data(json_data)
             weights = vl.comp_weights(reconstructed_tracks, validator_event_instance)
             t2p, p2t = vl.hit_purity(reconstructed_tracks, validator_event_instance.particles, weights)
-
+            visualize_truth(validator_event_instance.particles)
+            visualize_reconstructed_tracks(reconstructed_tracks)
             visualize_tracks(reconstructed_tracks, validator_event_instance.particles)
 
             #ghost_rate_value = vl.validate_ghost_fraction([json_data], [reconstructed_tracks])

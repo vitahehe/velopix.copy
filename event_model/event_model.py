@@ -1,4 +1,5 @@
 import hashlib
+import numpy as np
 
 class event(object):
   '''Event defined by its json description.'''
@@ -29,6 +30,28 @@ class event(object):
         self.hits
       ) for m in range(0, self.number_of_modules)
     ]
+
+def vp2q_event(vp_event, lx=None, ly=None):
+  modules = []
+  hits = []
+
+  hit2track = {}
+
+  for partid, particle in enumerate(vp_event.montecarlo['particles']):
+      for hitt in particle[-1]:
+          hit2track[hitt] = partid
+
+  for mmodule in vp_event.modules:
+      print(mmodule)
+      module_hits = []
+      for hitt in mmodule.hits():
+          module_hits.append(hit(hitt.id,hitt.x, hitt.y, hitt.z,mmodule.module_number, hit2track.get(hitt.id)))
+      print(mmodule.module_number, np.mean(list(mmodule.z)),lx,ly, module_hits)
+      modules.append(module(mmodule.module_number, np.mean(list(mmodule.z)),lx,ly, module_hits))
+      hits.extend(module_hits)
+      
+  q_event = event(modules,None, hits)
+  return q_event
 
 class track(object):
   '''A track, essentially a list of hits.'''
@@ -119,3 +142,4 @@ class module(object):
 
   def hits(self):
     return self.__global_hits[self.hit_start_index : self.hit_end_index]
+
