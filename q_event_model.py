@@ -2,6 +2,7 @@ import dataclasses as dc
 from mpl_toolkits.mplot3d import Axes3D, art3d
 from matplotlib.patches import Rectangle
 import numpy as np
+import event_model as em
 
 def set_axes_equal(ax):
    '''Make axes of 3D plot have equal scale so that spheres appear as spheres,
@@ -33,7 +34,7 @@ def set_axes_equal(ax):
 
 @dc.dataclass(frozen=True)
 class hit:
-   hit_id: int
+   id: int
    x: float
    y: float
    z: float
@@ -131,7 +132,6 @@ class event:
        ax.set_proj_type('ortho')
 
 
-
 def vp2q_event(vp_event, lx=None, ly=None):
    modules = []
    hits = []
@@ -145,9 +145,10 @@ def vp2q_event(vp_event, lx=None, ly=None):
    for mmodule in vp_event.modules:
        module_hits = []
        for hitt in mmodule.hits():
-           module_hits.append(hit(hitt.id,hitt.x, hitt.y, hitt.z,mmodule.module_id, hit2track.get(hitt.id)))
-
-       modules.append(module(mmodule.module_id, np.mean(list(mmodule.z)),lx,ly, module_hits))
+           module_hits.append(hit(hitt.id, hitt.x, hitt.y, hitt.z, mmodule.module_number, hit2track.get(hitt.id)))
+        
+       print(mmodule)
+       modules.append(module(mmodule.module_number, np.mean(list(mmodule.z)),lx,ly, module_hits))
        hits.extend(module_hits)
        
    q_event = event(modules,None, hits)

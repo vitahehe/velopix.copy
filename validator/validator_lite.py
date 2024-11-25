@@ -170,7 +170,7 @@ def update_efficiencies(eff, event, tracks, weights, label, cond):
 
     return eff
 
-def comp_weights(tracks, event):
+def comp_weightsORIGINal(tracks, event):
     """
     Compute w(t,p)
     The fraction of hits a particle p contributes to all hits of a track t.
@@ -191,6 +191,29 @@ def comp_weights(tracks, event):
             #     print(event.hit_to_mcp)
             #     raise
             w[i,j] = float(nhits_from_p)/nhits
+    return w
+
+def comp_weights(tracks, event):
+    """
+    Compute w(t,p)
+    The fraction of hits a particle p contributes to all hits of a track t.
+
+    Keyword arguments:
+    tracks -- a list of reconstructed tracks
+    event -- an instance of event_model.Event holding all information related to this event.
+    """
+    w = np.zeros((len(tracks), len(event.particles)))
+    for i, j in itertools.product(range(len(tracks)), range(len(event.particles))):
+        trackhits = tracks[i].hits
+        nhits = len(trackhits)
+        if nhits >= 2:
+            particle = event.particles[j]
+            # Compute the number of hits from particle p using the correct hit object
+            nhits_from_p = len([
+                h for h in trackhits 
+                if event.hit_to_mcp.get(event.get_hit(h.id), []).count(particle) > 0
+            ])
+            w[i, j] = float(nhits_from_p) / nhits
     return w
 
 def hit_purity(tracks, particles, weights):
