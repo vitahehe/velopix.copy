@@ -103,6 +103,7 @@ def generate_hamiltonian(event, params):
     beta = params.get('beta')
 
     modules = sorted(event.modules, key=lambda module: module.z)
+
     n_segments = 0
     segments_grouped = []
     segments = []
@@ -110,6 +111,8 @@ def generate_hamiltonian(event, params):
     for idx in range(len(event.modules) - 1):
         from_hits = event.modules[idx].hits
         to_hits = event.modules[idx + 1].hits
+        if not from_hits or not to_hits:
+            continue 
         print(from_hits)
         print(to_hits)
         #assert False
@@ -120,6 +123,8 @@ def generate_hamiltonian(event, params):
             segments.append(seg)
             n_segments = n_segments + 1
         segments_grouped.append(segments_group)
+    print(segments_grouped)
+    #assert False
     N = len(segments)
 
     A_ang = np.zeros((N, N))
@@ -134,21 +139,23 @@ def generate_hamiltonian(event, params):
             # print(f"[Inh interaction] A_inh[{i}, {i}] = {A_inh[i, i]} (penalized for same module).")
             
     for i, seg_i in enumerate(segments):
+        vect_i = seg_i.to_vect()
+        norm_i = np.linalg.norm(vect_i)
         for j, seg_j in enumerate(segments):
             if i != j:
-                vect_i = seg_i.to_vect()
                 vect_j = seg_j.to_vect()
+                norm_j = np.linalg.norm(vect_j)
 
-                cosine = np.dot(vect_i, vect_j) #/ (norm_i * norm_j)
-
+                #add back the norm, cos formula
+                if norm_i == 0 or norm_j == 0:
+                    cosine_similarity = 0
+                else:
+                    cosine_similarity = np.dot(vect_i, vect_j) / (norm_i * norm_j)
                 eps = 1e-4
 
-                # Populate A_ang if vectors are parallel
-                if np.abs(cosine - 1) < eps:
+    
+                if np.abs(cosine_similarity - 1) < eps:
                     A_ang[i, j] += -beta
-                    print(f"[generate_hamiltonian] A_ang[{i}, {j}] set to beta (angular consistency).")
-
-                #ahahshsh
                 if (seg_i.hit_from.module_id == seg_j.hit_from.module_id) and (seg_i.hit_to.id != seg_j.hit_to.id):
                     A_bif[i, j] += alpha
                     #print(f"[generate_hamiltonian] A_bif[{i}, {j}] set to {alpha} (bifurcation: same hit_from).")
