@@ -17,15 +17,16 @@ from event_model.event_model import event, track
 from q_event_model import vp2q_event
 import validator.validator_lite as vl
 from copy import deepcopy
-import restricted_event_model as vprem
+import restricted_event_model as vprem 
+import dataclasses
 from event_model import event_model as em
-from q_event_model import segment, track, hit
-import q_event_model as qem
+import third_event_model as tem
+
 
 def find_segments(s0, active):
     found_s = []
     for s1 in active:
-        if s0.to_hit.id == s1.from_hit.id or s0.from_hit.id == s1.to_hit.id:
+        if s0.hit_to.id == s1.hit_from.id or s0.hit_from.id == s1.hit_to.id:
             found_s.append(s1)
     return found_s
 
@@ -35,14 +36,15 @@ def get_qubo_solution(sol_sample, event, segments):
     active_segments = [
         segment for segment, pseudo_state in zip(segments, sol_sample) if pseudo_state == 1
     ]
-
+    print(segments,"\n")
+    print(active_segments)
     active = deepcopy(active_segments)
     tracks = []
 
     while active:
         s = active.pop()
         nextt = find_segments(s, active)
-        track = set([s.from_hit.id, s.to_hit.id])
+        track = set([s.hit_from.id, s.hit_to.id])
 
 
         while len(nextt):
@@ -52,7 +54,7 @@ def get_qubo_solution(sol_sample, event, segments):
             except ValueError:
                 pass
             nextt += find_segments(s, active)
-            track = track.union(set([s.from_hit.id, s.to_hit.id]))
+            track = track.union(set([s.hit_from.id, s.hit_to.id]))
         # List of tracks
         tracks.append(track)
 
@@ -78,15 +80,11 @@ def qubosolverHr(A, b):
         else:
             bqm.add_variable(i, A[i, j])
 
-    #print the statistics just to be sure whats happenijng
-    print(f"\n[QUBO Solver] BQM has {len(bqm.variables)} variables and {len(bqm.quadratic)} interactions.")
-
     sampler = LeapHybridSampler()
     response = sampler.sample(bqm)
     best_sample = response.first.sample
     sol_sample = np.array([best_sample[i] for i in range(len(b))], dtype=int)
 
-    #solution statistics
     num_selected = np.sum(sol_sample)
     print(f"[QUBO Solver] Number of variables selected (value=1): {num_selected}")
 
@@ -105,35 +103,28 @@ def generate_hamiltonian(event, params):
     beta = params.get('beta')
 
     modules = sorted(event.modules, key=lambda module: module.z)
-
-    # Generate segments with increasing z-coordinates
+    n_segments = 0
+    segments_grouped = []
     segments = []
-    for idx in range(len(modules) - 1):
-        current_hits = modules[idx].hits
-        
-        # Find the next module with hits and increasing z-coordinate
-        next_module_idx = idx + 1
-        while next_module_idx < len(modules) and len(modules[next_module_idx].hits) == 0:
-            next_module_idx += 1
-
-        if next_module_idx < len(modules):  # Ensure valid index
-            next_hits = modules[next_module_idx].hits
-            
-            # Generate segments between hits with increasing z
-            for from_hit, to_hit in itertools.product(current_hits, next_hits):
-                if to_hit.z > from_hit.z:
-                    segments.append(segment(from_hit, to_hit))
+    segment_id = itertools.count()
+    for idx in range(len(event.modules) - 1):
+        from_hits = event.modules[idx].hits
+        to_hits = event.modules[idx + 1].hits
+        print(from_hits)
+        print(to_hits)
+        #assert False
+        segments_group = []
+        for hit_from, hit_to in itertools.product(from_hits, to_hits):
+            seg = tem.Segment(next(segment_id), hit_from, hit_to)
+            segments_group.append(seg)
+            segments.append(seg)
+            n_segments = n_segments + 1
+        segments_grouped.append(segments_group)
     N = len(segments)
-    print(f"[generate_hamiltonian] Total number of segments generated: {N}")
 
-    if N == 0:
-        print("[generate_hamiltonian] No segments generated. Returning empty Hamiltonian.")
-        return np.zeros((0, 0)), np.zeros(0), segments
-
-    # Initialize Hamiltonian matrices and vector
     A_ang = np.zeros((N, N))
     A_bif = np.zeros((N, N))
-    A_inh = np.zeros((N, N))
+
     b = np.zeros(N)
 
     # Uncomment and correct if you intend to use A_inh
@@ -141,41 +132,32 @@ def generate_hamiltonian(event, params):
         # if seg.from_hit.module_id == seg.to_hit.module_id:
             # A_inh[i, i] = beta
             # print(f"[Inh interaction] A_inh[{i}, {i}] = {A_inh[i, i]} (penalized for same module).")
-
-    print("[generate_hamiltonian] Populating A_ang, A_bif")
+            
     for i, seg_i in enumerate(segments):
         for j, seg_j in enumerate(segments):
             if i != j:
                 vect_i = seg_i.to_vect()
                 vect_j = seg_j.to_vect()
-                norm_i = np.linalg.norm(vect_i)
-                norm_j = np.linalg.norm(vect_j)
-                
-                # Avoid division by zero
-                if norm_i == 0 or norm_j == 0:
-                    cosine = 0
-                    print(f"[generate_hamiltonian] Warning: Zero-length vector detected for segments {i} or {j}.")
-                else:
-                    cosine = np.dot(vect_i, vect_j) / (norm_i * norm_j)
 
-                eps = 1e-2
+                cosine = np.dot(vect_i, vect_j) #/ (norm_i * norm_j)
+
+                eps = 1e-4
 
                 # Populate A_ang if vectors are parallel
                 if np.abs(cosine - 1) < eps:
-                    A_ang[i, j] = -beta
+                    A_ang[i, j] += -beta
                     print(f"[generate_hamiltonian] A_ang[{i}, {j}] set to beta (angular consistency).")
 
                 #ahahshsh
-                if (seg_i.from_hit.module_id == seg_j.from_hit.module_id) and (seg_i.to_hit.id != seg_j.to_hit.id):
-                    A_bif[i, j] = alpha
-                    print(f"[generate_hamiltonian] A_bif[{i}, {j}] set to {alpha} (bifurcation: same from_hit).")
-                if (seg_i.from_hit.module_id != seg_j.from_hit.module_id) and (seg_i.to_hit.module_id == seg_j.to_hit.module_id):
-                    A_bif[i, j] = alpha
-                    print(f"[generate_hamiltonian] A_bif[{i}, {j}] set to {alpha} (bifurcation: same to_hit).")
+                if (seg_i.hit_from.module_id == seg_j.hit_from.module_id) and (seg_i.hit_to.id != seg_j.hit_to.id):
+                    A_bif[i, j] += alpha
+                    #print(f"[generate_hamiltonian] A_bif[{i}, {j}] set to {alpha} (bifurcation: same hit_from).")
+                if (seg_i.hit_from.module_id != seg_j.hit_from.module_id) and (seg_i.hit_to.module_id == seg_j.hit_to.module_id):
+                    A_bif[i, j] += alpha
+                    #print(f"[generate_hamiltonian] A_bif[{i}, {j}] set to {alpha} (bifurcation: same to_hit).")
 
-    # Compute the final Hamiltonian matrix
     A = lambda_val * (A_ang + A_bif)
-    print("[generate_hamiltonian] Combined A_ang, A_bif, and A_inh into final Hamiltonian matrix A.")
+
 
     # Print Hamiltonian matrix statistics
     print(f"[generate_hamiltonian] Hamiltonian matrix A shape: {A.shape}")
@@ -224,14 +206,14 @@ def main():
             restrict_consec_modules = False
             restrict_min_nb_hits = 3
             restricted_modules_even = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50]
-            restricted_modules_odd = [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39, 41, 43, 45, 47, 49, 51]
-            restricted_modules = list(range(52))
+            #restricted_modules_odd = [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39, 41, 43, 45, 47, 49, 51]
+            #restricted_modules = list(range(52))
 
             f = open(os.path.realpath(os.path.join(dirpath, filename)))
-            event, json_data = vprem.restrict_event(json.loads(f.read()), restricted_modules, restrict_min_nb_hits, restrict_consec_modules)
+            event, json_data = vprem.restrict_event(json.loads(f.read()), restricted_modules_even, restrict_min_nb_hits, restrict_consec_modules)
             f.close()
 
-            ev = em.event(json_data)
+            #ev = em.event(json_data)
             q_event = vp2q_event(event)
             
             print(f"[Main] Reconstructing event {i}...")
@@ -240,12 +222,12 @@ def main():
         
             sol_sample = qubosolverHr(A, b)
             reconstructed_tracks = get_qubo_solution(sol_sample, q_event, segments)
-            print('\n', 'reconstructed tracks', reconstructed_tracks)
+            #print('\n', 'reconstructed tracks', reconstructed_tracks)
 
             solutions["qubo_track_reconstruction"].append(reconstructed_tracks)
             validation_data.append(json_data)
-            print(validation_data)
-            print(solutions)
+            #print(validation_data)
+            #print(solutions)
             plot_reconstructed_tracks(reconstructed_tracks)
 
             validator_event_instance = vl.parse_json_data(json_data)
