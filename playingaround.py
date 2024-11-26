@@ -151,7 +151,7 @@ def generate_hamiltonian(event, params):
                     cosine_similarity = 0
                 else:
                     cosine_similarity = np.dot(vect_i, vect_j) / (norm_i * norm_j)
-                eps = 1e-4
+                eps = 1e-6
 
     
                 if np.abs(cosine_similarity - 1) < eps:
@@ -197,7 +197,7 @@ def main():
     params = {
         'lambda': 1.0, #multiply at the end +
         'alpha': 1.0, #a_bif penelizes bifunctions -
-        'beta': 1.0, #same module penalty A_inh -
+        'beta': 4.0, #same module penalty A_inh -
     }
 
     solutions = {
