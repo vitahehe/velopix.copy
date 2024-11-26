@@ -32,17 +32,26 @@ def set_axes_equal(ax):
    ax.set_ylim3d([y_middle - plot_radius, y_middle + plot_radius])
    ax.set_zlim3d([z_middle - plot_radius, z_middle + plot_radius])
 
-@dc.dataclass(frozen=True)
+@dc.dataclass(frozen=False, eq=False)
 class hit:
-   id: int
-   x: float
-   y: float
-   z: float
-   module_id: int
-   track_id: int
+    id: int
+    x: float
+    y: float
+    z: float
+    module_id: int
+    track_id: int
 
-   def __getitem__(self, index):
-       return (self.x, self.y, self.z)[index]
+    def __eq__(self, other):
+        if isinstance(other, hit):
+            return self.id == other.id
+        return False
+
+    def __hash__(self):
+        return hash(self.id)
+
+    def __repr__(self):
+        return (f"hit(id={self.id}, x={self.x}, y={self.y}, z={self.z}, "
+                f"module_id={self.module_id}, track_id={self.track_id})")
 
 @dc.dataclass(frozen=True)
 class module:
@@ -145,7 +154,7 @@ def vp2q_event(vp_event, lx=None, ly=None):
    for mmodule in vp_event.modules:
        module_hits = []
        for hitt in mmodule.hits():
-           module_hits.append(hit(hitt.id, hitt.x, hitt.y, hitt.z, mmodule.module_number, hit2track.get(hitt.id)))
+            module_hits.append(hit(hitt.id, hitt.x, hitt.y, hitt.z, mmodule.module_number, hit2track.get(hitt.id)))
         
        print(mmodule)
        modules.append(module(mmodule.module_number, np.mean(list(mmodule.z)),lx,ly, module_hits))

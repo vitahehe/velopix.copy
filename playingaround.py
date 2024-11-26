@@ -19,39 +19,13 @@ import validator.validator_lite as vl
 from copy import deepcopy
 import restricted_event_model as vprem
 from event_model import event_model as em
-
-def visualize_segments(segments):
-
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.set_title("Constructed Segments")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-
-    for seg in segments:
-        x = [seg.from_hit.x, seg.to_hit.x]
-        y = [seg.from_hit.y, seg.to_hit.y]
-        z = [seg.from_hit.z, seg.to_hit.z]
-        ax.plot(x, y, z, color="purple", linestyle="-", label="Segment" if seg == segments[0] else "")
-
-    ax.legend()
-    plt.show()
-
-
-def plot_qubo_sparsity(A_total, title="QUBO Matrix Sparsity"):
-    plt.figure(figsize=(10, 10))
-    plt.spy(A_total, markersize=1)
-    plt.title(title)
-    plt.xlabel('Variables')
-    plt.ylabel('Variables')
-    plt.show()
+from q_event_model import segment, track, hit
+import q_event_model as qem
 
 def find_segments(s0, active):
     found_s = []
     for s1 in active:
-        if s0.from_hit.id == s1.to_hit.id or \
-        s1.from_hit.id == s0.to_hit.id:
+        if s0.to_hit.id == s1.from_hit.id or s0.from_hit.id == s1.to_hit.id:
             found_s.append(s1)
     return found_s
 
@@ -88,9 +62,9 @@ def get_qubo_solution(sol_sample, event, segments):
     print(f'\n tracks{tracks}')
     print(f'\n tracks_processed{tracks_processed}')
 
-    return tracks_processed  # Added return statement
-
-os.environ['DWAVE_API_TOKEN'] = 'DEV-b59f413d6a1407427e9f0079dd8e3cfb8106e58d'  
+    return tracks_processed
+#markoss tokan
+os.environ['DWAVE_API_TOKEN'] = 'DEV-21eed68bc845cad41711b2246f5765393f209d1f'  
 
 def qubosolverHr(A, b):
     A = csc_matrix(A)
@@ -118,51 +92,11 @@ def qubosolverHr(A, b):
 
     return sol_sample
 
-class Segment:
-    def __init__(self, from_hit, to_hit):
-
-        if not from_hit or not to_hit:
-            raise ValueError("Both from_hit and to_hit must be valid Hit objects.")
-        self.from_hit = from_hit
-        self.to_hit = to_hit
-
-    def to_vect(self):
-
-        return np.array([
-            self.to_hit.x - self.from_hit.x,
-            self.to_hit.y - self.from_hit.y,
-            self.to_hit.z - self.from_hit.z
-        ])
-
-    def length(self):
-        vect = self.to_vect()
-        return np.linalg.norm(vect)
-
-    def normalized_vect(self):
-        vect = self.to_vect()
-        norm = np.linalg.norm(vect)
-        if norm == 0:
-            raise ValueError("Zero-length segment cannot be normalized.")
-        return vect / norm
-
-    def __repr__(self):
-        return (f"Segment(from_hit=Hit(x={self.from_hit.x}, y={self.from_hit.y}, z={self.from_hit.z}), "
-                f"to_hit=Hit(x={self.to_hit.x}, y={self.to_hit.y}, z={self.to_hit.z}))")
-
-    def __str__(self):
-        return f"Segment from ({self.from_hit.x}, {self.from_hit.y}, {self.from_hit.z}) to ({self.to_hit.x}, {self.to_hit.y}, {self.to_hit.z})"
-
-
 import numpy as np
 import scipy.sparse as sp
 from scipy.sparse import dok_matrix, csc_matrix
 from joblib import Parallel, delayed
-import itertools
 
-import numpy as np
-import scipy.sparse as sp
-from scipy.sparse import dok_matrix, csc_matrix
-from joblib import Parallel, delayed
 
 def generate_hamiltonian(event, params):
     print("\n[generate_hamiltonian] Starting Hamiltonian generation...")
@@ -170,43 +104,25 @@ def generate_hamiltonian(event, params):
     alpha = params.get('alpha')
     beta = params.get('beta')
 
-    # Deep copy and sort modules by module_id
-    modules = deepcopy(event.modules)
-    modules.sort(key=lambda module: module.module_id)  # Sorted by module_id instead of z coordinate
+    modules = sorted(event.modules, key=lambda module: module.z)
 
-    print("[generate_hamiltonian] Modules deep-copied and sorted by module_id")
-    print(f"[generate_hamiltonian] Number of modules after sorting: {len(modules)}")
-
-    # Generate segments skipping over modules without hits
+    # Generate segments with increasing z-coordinates
     segments = []
     for idx in range(len(modules) - 1):
-        current_module = modules[idx]
-        next_idx = idx + 1
+        current_hits = modules[idx].hits
+        
+        # Find the next module with hits and increasing z-coordinate
+        next_module_idx = idx + 1
+        while next_module_idx < len(modules) and len(modules[next_module_idx].hits) == 0:
+            next_module_idx += 1
 
-        # Skip modules that have no hits
-        while next_idx < len(modules) and not modules[next_idx].hits:
-            next_idx += 1
-
-        # No valid next module with hits, just break
-        if next_idx >= len(modules):
-            break
-
-        hits_current = current_module.hits
-        hits_next = modules[next_idx].hits
-
-        # Skip if no hits on the current module
-        if not hits_current:
-            continue
-
-        # Generate segments between all pairs of hits in the current and next modules
-        new_segments = [
-            Segment(from_hit, to_hit)
-            for from_hit, to_hit in itertools.product(hits_current, hits_next)
-        ]
-        segments.extend(new_segments)
-
-        print(f"Generated {len(new_segments)} segments.")
-
+        if next_module_idx < len(modules):  # Ensure valid index
+            next_hits = modules[next_module_idx].hits
+            
+            # Generate segments between hits with increasing z
+            for from_hit, to_hit in itertools.product(current_hits, next_hits):
+                if to_hit.z > from_hit.z:
+                    segments.append(segment(from_hit, to_hit))
     N = len(segments)
     print(f"[generate_hamiltonian] Total number of segments generated: {N}")
 
@@ -242,14 +158,14 @@ def generate_hamiltonian(event, params):
                 else:
                     cosine = np.dot(vect_i, vect_j) / (norm_i * norm_j)
 
-                eps = 1e-5
+                eps = 1e-2
 
                 # Populate A_ang if vectors are parallel
                 if np.abs(cosine - 1) < eps:
-                    A_ang[i, j] = -50
-                    print(f"[generate_hamiltonian] A_ang[{i}, {j}] set to -50 (angular consistency).")
+                    A_ang[i, j] = -beta
+                    print(f"[generate_hamiltonian] A_ang[{i}, {j}] set to beta (angular consistency).")
 
-                # Populate A_bif for bifurcations based on module_id and hit_id
+                #ahahshsh
                 if (seg_i.from_hit.module_id == seg_j.from_hit.module_id) and (seg_i.to_hit.id != seg_j.to_hit.id):
                     A_bif[i, j] = alpha
                     print(f"[generate_hamiltonian] A_bif[{i}, {j}] set to {alpha} (bifurcation: same from_hit).")
@@ -258,7 +174,7 @@ def generate_hamiltonian(event, params):
                     print(f"[generate_hamiltonian] A_bif[{i}, {j}] set to {alpha} (bifurcation: same to_hit).")
 
     # Compute the final Hamiltonian matrix
-    A = lambda_val * (A_ang + A_bif + A_inh)
+    A = lambda_val * (A_ang + A_bif)
     print("[generate_hamiltonian] Combined A_ang, A_bif, and A_inh into final Hamiltonian matrix A.")
 
     # Print Hamiltonian matrix statistics
@@ -267,162 +183,32 @@ def generate_hamiltonian(event, params):
 
     return A, b, segments
 
-
-
-
-#function just to see whats up with the solutions
-def calculate_residuals(reconstructed_tracks, ground_truth_particles):
-
-    residuals = []
-    for rec_track in reconstructed_tracks:
-        best_match = None
-        min_residual = float('inf')
-
-        for true_particle in ground_truth_particles:
-            rec_hit_ids = set(hit.id for hit in rec_track.hits)
-            true_hit_ids = set(hit.id for hit in true_particle.velohits)
-            common_hits = rec_hit_ids & true_hit_ids
-            total_hits = rec_hit_ids | true_hit_ids
-            residual = len(total_hits) - len(common_hits)
-
-            if residual < min_residual:
-                min_residual = residual
-                best_match = true_particle
-
-        residuals.append((rec_track, best_match, min_residual))
-
-    return residuals
-
-
-
-
-def visualize_tracks(reconstructed_tracks, ground_truth_particles):
-
-    fig = plt.figure(figsize=(10, 8))
+def plot_reconstructed_tracks(reconstructed_tracks):
+ 
+    fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
-    ax.set_title("Particle Track Reconstruction")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-
-    #reconstructed track coppied
-    for track in reconstructed_tracks:
+    
+    for track_idx, track in enumerate(reconstructed_tracks):
         x = [hit.x for hit in track.hits]
         y = [hit.y for hit in track.hits]
         z = [hit.z for hit in track.hits]
-        ax.plot(x, y, z, linestyle="--", color="red", label="Reconstructed Track" if track == reconstructed_tracks[0] else "")
+        
+        ax.plot(x, y, z, label=f'Track {track_idx+1}')
 
-    #true particle tracks plotting
-    for particle in ground_truth_particles:
-        x = [hit.x for hit in particle.velohits]
-        y = [hit.y for hit in particle.velohits]
-        z = [hit.z for hit in particle.velohits]
-        ax.plot(x, y, z, linestyle="-", color="blue", label="True Track" if particle == ground_truth_particles[0] else "")
-
-    ax.legend()
-    plt.show()
-
-def visualize_reconstructed_tracks(reconstructed_tracks):
-    """
-    Visualizes reconstructed particle tracks in a 3D plot.
-
-    Parameters:
-    - reconstructed_tracks (List[Set[Hit]]): A list where each element is a set of Hit objects representing a reconstructed track.
-    """
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.set_title("Particle Track Reconstruction")
+    ax.set_title("Reconstructed Tracks")
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
-
-    # Iterate over each track
-    for idx, track in enumerate(reconstructed_tracks):
-        # Convert the set to a sorted list for coherent plotting
-        # Sorting by z-coordinate; adjust the key if another order is preferred
-        sorted_hits = sorted(track, key=lambda hit: hit.z)
-        
-        # Extract x, y, z coordinates
-        x = [hit.x for hit in sorted_hits]
-        y = [hit.y for hit in sorted_hits]
-        z = [hit.z for hit in sorted_hits]
-        
-        # Plot the track
-        # Label only the first track to avoid duplicate labels in the legend
-        label = "Reconstructed Track" if idx == 0 else ""
-        ax.plot(x, y, z, linestyle="--", color="red", label=label)
-    
-    # Add legend only if there are tracks
-    if reconstructed_tracks:
-        ax.legend()
-    
-    plt.show()
-def visualize_truth(ground_truth_particles):
-
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.set_title("Particle Track Reconstruction")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-
-    #true particle tracks plotting
-    for particle in ground_truth_particles:
-        x = [hit.x for hit in particle.velohits]
-        y = [hit.y for hit in particle.velohits]
-        z = [hit.z for hit in particle.velohits]
-        ax.plot(x, y, z, linestyle="-", color="blue", label="True Track" if particle == ground_truth_particles[0] else "")
-
     ax.legend()
     plt.show()
-
-#optimizing weights
-def plot_qubo_histogram(A_total, title="QUBO Coefficient Distribution"):
-
-    data = A_total.data
-    plt.figure(figsize=(8, 6))
-    plt.hist(data, bins=50, color='skyblue', edgecolor='black')
-    plt.title(title)
-    plt.xlabel('Coefficient Value')
-    plt.ylabel('Frequency')
-    plt.grid(True)
-    plt.show()
-
-
-#plotting function to understand wtf is happening with coefficients
-def analyze_qubo_coefficients(A_total, top_n=10):
- 
-    upper_tri = np.triu(A_total, k=1).tocoo()
-    coefficients = upper_tri.data
-    top_positive_indices = np.argsort(coefficients)[-top_n:]
-    top_positive = coefficients[top_positive_indices]
-    top_positive_vars = list(zip(upper_tri.row[top_positive_indices], upper_tri.col[top_positive_indices]))
-
-    top_negative_indices = np.argsort(coefficients)[:top_n]
-    top_negative = coefficients[top_negative_indices]
-    top_negative_vars = list(zip(upper_tri.row[top_negative_indices], upper_tri.col[top_negative_indices]))
-
-    print(f"Top {top_n} Positive Coefficients:")
-    for coeff, vars in zip(top_positive, top_positive_vars):
-        print(f"Variables {vars}: {coeff}")
-
-    print(f"\nTop {top_n} Negative Coefficients:")
-    for coeff, vars in zip(top_negative, top_negative_vars):
-        print(f"Variables {vars}: {coeff}")
-
-
-from types import SimpleNamespace
 
 
 #combines everything, compares and plots correct and found solutions
 def main():
     params = {
         'lambda': 1.0, #multiply at the end +
-        'alpha': 50.0, #a_bif penelizes bifunctions -
-        'beta': 100.0, #same module penalty A_inh -
-        'track_length_penalty' : 30,
-        'two_hit_penalty' : 10,
-        'hit_overlap_penalty': 10 
+        'alpha': 1.0, #a_bif penelizes bifunctions -
+        'beta': 1.0, #same module penalty A_inh -
     }
 
     solutions = {
@@ -460,9 +246,9 @@ def main():
             validation_data.append(json_data)
             print(validation_data)
             print(solutions)
+            plot_reconstructed_tracks(reconstructed_tracks)
 
             validator_event_instance = vl.parse_json_data(json_data)
-            visualize_truth(validator_event_instance.particles)
 
     for k, v in sorted(solutions.items()):
         print(f"\n[Validation Summary] Validating tracks from {k}:")
