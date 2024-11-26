@@ -65,7 +65,8 @@ def get_qubo_solution(sol_sample, event, segments):
     print(f'\n tracks_processed{tracks_processed}')
 
     return tracks_processed
-#markoss tokan
+
+
 os.environ['DWAVE_API_TOKEN'] = 'DEV-21eed68bc845cad41711b2246f5765393f209d1f'  
 
 def qubosolverHr(A, b):
@@ -190,14 +191,66 @@ def plot_reconstructed_tracks(reconstructed_tracks):
     ax.set_zlabel("Z")
     ax.legend()
     plt.show()
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # Necessary for 3D plotting
+
+def plot_true_tracks(validator_events):
+    """
+    Plots the true Monte Carlo tracks for each event.
+    
+    Parameters:
+    - validator_events: List of validator_event instances containing true track information.
+    """
+    for event_idx, event in enumerate(validator_events):
+        fig = plt.figure(figsize=(12, 8))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        # Plot all hits as small points
+        x_all = [hit.x for hit in event.hits]
+        y_all = [hit.y for hit in event.hits]
+        z_all = [hit.z for hit in event.hits]
+        ax.scatter(x_all, y_all, z_all, c='gray', alpha=0.3, label='All Hits')
+        
+        # Plot true tracks
+        for particle in event.particles:
+            if not particle.velohits:
+                continue  # Skip particles with no hits
+            x = [hit.x for hit in particle.velohits]
+            y = [hit.y for hit in particle.velohits]
+            z = [hit.z for hit in particle.velohits]
+            ax.plot(x, y, z, label=f'True Track pkey={particle.pkey}', linewidth=2)
+        
+        ax.set_title(f"True Tracks for Event {event_idx+1}")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        ax.legend()
+        plt.show()
+
+
+
+#alfa beta results
+#1      1       2clones, 6/8tracks oghosts
+#1      2       1 clone  6/8 tracks 0 ghosts
+#1      3       1 clone  6/8 tracks 0 ghosts
+#1      4       1 clone  6/8         0gh
+#1      5       1 clone  6/8         0
+#2      1       0clone   2/8         1
+#3      1         4 traks 4 ghosts
+#4      1        6 tracks 6 ghosts
+#5      1        4 traks 4 ghosts
+#2      5        1 clone 6/8 tracks  0 ghosts
+
+
+
 
 
 #combines everything, compares and plots correct and found solutions
 def main():
     params = {
         'lambda': 1.0, #multiply at the end +
-        'alpha': 1.0, #a_bif penelizes bifunctions -
-        'beta': 4.0, #same module penalty A_inh -
+        'alpha': 2.0, #a_bif penelizes bifunctions 
+        'beta': 5.0, #aligment encouragment, 4 and 5 work well in combo with alpha 1, youst so you rimember. 
     }
 
     solutions = {
@@ -236,8 +289,9 @@ def main():
             #print(validation_data)
             #print(solutions)
             plot_reconstructed_tracks(reconstructed_tracks)
-
             validator_event_instance = vl.parse_json_data(json_data)
+            plot_true_tracks([validator_event_instance])
+          
 
     for k, v in sorted(solutions.items()):
         print(f"\n[Validation Summary] Validating tracks from {k}:")
