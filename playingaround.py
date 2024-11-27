@@ -96,6 +96,97 @@ import scipy.sparse as sp
 from scipy.sparse import dok_matrix, csc_matrix
 from joblib import Parallel, delayed
 
+import numpy as np
+import itertools
+from scipy.sparse import lil_matrix
+
+def generate_hamiltonianOPT(event, params):
+    print("\n[generate_hamiltonian] Starting Hamiltonian generation...")
+    lambda_val = params.get('lambda')
+    alpha = params.get('alpha')
+    beta = params.get('beta')
+
+    # Sort modules by their z-coordinate for consistent segment generation
+    modules = sorted(event.modules, key=lambda module: module.z)
+
+    segments_grouped = []
+    segments = []
+    segment_id = itertools.count()
+    
+    # Generate all possible segments between consecutive modules
+    for idx in range(len(modules) - 1):
+        from_hits = modules[idx].hits
+        to_hits = modules[idx + 1].hits
+        if not from_hits or not to_hits:
+            continue 
+        
+        segments_group = []
+        # Use itertools.product for Cartesian product of hits
+        for hit_from, hit_to in itertools.product(from_hits, to_hits):
+            seg = tem.Segment(next(segment_id), hit_from, hit_to)
+            segments_group.append(seg)
+            segments.append(seg)
+        segments_grouped.append(segments_group)
+    
+    N = len(segments)
+    print(f"[generate_hamiltonian] Total number of segments: {N}")
+
+    if N == 0:
+        print("[generate_hamiltonian] No segments found. Returning empty Hamiltonian.")
+        return np.array([[]]), np.array([]), segments
+
+    # Initialize sparse matrices for angular and bifurcation interactions
+    A_ang = lil_matrix((N, N), dtype=np.float32)
+    A_bif = lil_matrix((N, N), dtype=np.float32)
+    b = np.zeros(N, dtype=np.float32)  # Linear term remains unchanged
+
+    # Precompute all vectors and their norms for efficiency
+    vectors = np.array([seg.to_vect() for seg in segments], dtype=np.float32)  # Shape: (N, 3)
+    norms = np.linalg.norm(vectors, axis=1)  # Shape: (N,)
+
+    # To prevent division by zero, set zero norms to one temporarily
+    norms_safe = np.where(norms == 0, 1, norms)
+    
+    # Compute the cosine similarity matrix using vectorized operations
+    cosine_similarity = np.dot(vectors, vectors.T) / (norms_safe[:, None] * norms_safe[None, :])
+    
+    # Replace NaNs resulting from zero division with zeros
+    cosine_similarity = np.nan_to_num(cosine_similarity)
+    eps = 1e-6
+
+    #mask
+    mask_ang = np.abs(cosine_similarity - 1) < eps
+    np.fill_diagonal(mask_ang, False)  
+
+    #met angular condition
+    ang_i, ang_j = np.where(mask_ang)
+    A_ang[ang_i, ang_j] = -beta
+
+    #compute module IDs and hit IDs for all segments
+    module_from_ids = np.array([seg.hit_from.module_id for seg in segments])
+    module_to_ids = np.array([seg.hit_to.module_id for seg in segments])
+    hit_to_ids = np.array([seg.hit_to.id for seg in segments])
+    hit_from_ids = np.array([seg.hit_from.id for seg in segments])
+    #biff terms filled
+
+    mask_bif1 = (module_from_ids[:, None] == module_from_ids[None, :]) & (hit_to_ids[:, None] != hit_to_ids[None, :])
+    mask_bif2 = (module_to_ids[:, None] == module_to_ids[None, :]) & (hit_from_ids[:, None] != hit_from_ids[None, :])
+    mask_bif = mask_bif1 | mask_bif2
+    np.fill_diagonal(mask_bif, False)  # Exclude self-interactions
+
+    #met conditions
+    bif_i, bif_j = np.where(mask_bif)
+    A_bif[bif_i, bif_j] = alpha
+
+    A_combined = lambda_val * (A_ang + A_bif)
+    A = A_combined.tocsr()
+
+    print(f"[generate_hamiltonian] Hamiltonian matrix A shape: {A.shape}")
+    print(f"[generate_hamiltonian] Hamiltonian matrix A has {A.nnz} non-zero elements.")
+
+    return A, b, segments
+
+
 
 def generate_hamiltonian(event, params):
     print("\n[generate_hamiltonian] Starting Hamiltonian generation...")
@@ -124,7 +215,6 @@ def generate_hamiltonian(event, params):
             segments.append(seg)
             n_segments = n_segments + 1
         segments_grouped.append(segments_group)
-    print(segments_grouped)
     #assert False
     N = len(segments)
 
@@ -234,7 +324,7 @@ def plot_true_tracks(validator_events):
 #1      2       1 clone  6/8 tracks 0 ghosts
 #1      3       1 clone  6/8 tracks 0 ghosts
 #1      4       1 clone  6/8         0gh
-#1      5       1 clone  6/8         0
+#1      5       1 clone  7/8         0
 #2      1       0clone   2/8         1
 #3      1         4 traks 4 ghosts
 #4      1        6 tracks 6 ghosts
@@ -249,9 +339,9 @@ def plot_true_tracks(validator_events):
 def main():
     params = {
         'lambda': 1.0, #multiply at the end +
-        'alpha': 2.0, #a_bif penelizes bifunctions 
-        'beta': 5.0, #aligment encouragment, 4 and 5 work well in combo with alpha 1, youst so you rimember. 
-    }
+        'alpha': 1.0, #a_bif penelizes bifunctions 
+        'beta': 3.0, #aligment encouragment, 4 and 5 work well in combo with alpha 1, youst so you rimember. 
+    }                # for otimized: best alpha 1 and beta 3
 
     solutions = {
         "qubo_track_reconstruction": []
@@ -277,7 +367,7 @@ def main():
             q_event = vp2q_event(event)
             
             print(f"[Main] Reconstructing event {i}...")
-            A, b, segments = generate_hamiltonian(q_event, params)
+            A, b, segments = generate_hamiltonianOPT(q_event, params)
         
         
             sol_sample = qubosolverHr(A, b)
