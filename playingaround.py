@@ -67,7 +67,7 @@ def get_qubo_solution(sol_sample, event, segments):
     return tracks_processed
 
 
-os.environ['DWAVE_API_TOKEN'] = 'DEV-21eed68bc845cad41711b2246f5765393f209d1f'  
+os.environ['DWAVE_API_TOKEN'] = 'DEV-4ef8a7f5a5857e4e041eb3c24b647bf8433f98a2'  
 
 def qubosolverHr(A, b):
     A = csc_matrix(A)
@@ -96,9 +96,6 @@ import scipy.sparse as sp
 from scipy.sparse import dok_matrix, csc_matrix
 from joblib import Parallel, delayed
 
-import numpy as np
-import itertools
-from scipy.sparse import lil_matrix
 
 def generate_hamiltonianOPT(event, params):
     print("\n[generate_hamiltonian] Starting Hamiltonian generation...")
@@ -316,32 +313,23 @@ def plot_true_tracks(validator_events):
         ax.set_zlabel("Z")
         ax.legend()
         plt.show()
-
-
-
-#alfa beta results
-#1      1       2clones, 6/8tracks oghosts
-#1      2       1 clone  6/8 tracks 0 ghosts
-#1      3       1 clone  6/8 tracks 0 ghosts
-#1      4       1 clone  6/8         0gh
-#1      5       1 clone  7/8         0
-#2      1       0clone   2/8         1
-#3      1         4 traks 4 ghosts
-#4      1        6 tracks 6 ghosts
-#5      1        4 traks 4 ghosts
-#2      5        1 clone 6/8 tracks  0 ghosts
-
-
-
+#for optimized ham
+#event 2: alpha= 1 beta 3    7/8 tracks 1 clone, eps =1e-6
+#even 0 :
+#event 7
+#event 8
 
 
 #combines everything, compares and plots correct and found solutions
 def main():
     params = {
         'lambda': 1.0, #multiply at the end +
-        'alpha': 1.0, #a_bif penelizes bifunctions 
-        'beta': 3.0, #aligment encouragment, 4 and 5 work well in combo with alpha 1, youst so you rimember. 
-    }                # for otimized: best alpha 1 and beta 3
+        'alpha': 1.0, #a_bif penelizes bifunctions. #decrease if segments are ended prematurely #increase ifclones persist
+        'beta': 6.0, #aligment encouragment, 4 and 5 work well in combo with alpha 1, youst so you rimember. 
+    }                # for otimized: best alpha 1 and beta 3 event2
+    #event 0: 1 15 best so far
+
+#small 0278
 
     solutions = {
         "qubo_track_reconstruction": []
@@ -350,7 +338,7 @@ def main():
 
     for (dirpath, dirnames, filenames) in os.walk("events"):
         for i, filename in enumerate(filenames):
-            if i != 2:
+            if i !=0:
                 continue
 
             restrict_consec_modules = False
